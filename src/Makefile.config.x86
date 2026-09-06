@@ -1,0 +1,268 @@
+
+# Set USE_OPENMP = 1 to compile with openmp
+# Set USE_OPENMP = 0 otherwise
+USE_OPENMP			= 1
+# Specify the path OPENMP if necessary
+# OPENMPROOT = /opt/homebrew/opt/libomp
+
+# Choose whether to use KML, MKL or OpenBLAS
+# Set USE_KML = 1 to compile with KML BLAS, LAPACK, and ScaLAPACK, and ignore the USE_MKL, USE_SCALAPACK, USE_LAPACK and USE_OPENBLAS flags
+# Set USE_KML = 0 otherwise
+USE_KML				= 0
+# Specify the path KMLROOT if it's not already set to compile with KML, e.g,
+KMLROOT ?= /path/to/kml
+
+# Choose whether to use MKL or OpenBLAS
+# Set USE_MKL = 1 to compile with MKL BLAS, LAPACK, and ScaLAPACK, and ignore the USE_SCALAPACK, USE_LAPACK and USE_OPENBLAS flags
+# Set USE_MKL = 0 otherwise
+USE_MKL				= 1
+# Specify the path MKLROOT if it's not already set to compile with MKL, e.g,
+MKLROOT ?= /opt/intel/oneapi/mkl/2025.1
+
+# Set USE_SCALAPACK = 1 to compile with ScaLAPACK
+# Set USE_SCALAPACK = 0 otherwise
+# NOTE: when USE_SCALAPACK = 1, USE_OPENBLAS should be 1 or USE_CBLAS and USE_LAPACK are both 1.
+USE_SCALAPACK		= 0
+# Specify the path to ScaLAPACK if necessary
+SCALAPACKROOT ?= /home/zhangyu/Download/scalapack-2.2.0
+
+# Set USE_OPENBLAS = 1 to compile with OPENBLAS BLAS and LAPACK, and ignore the USE_LAPACK and USE_CBLAS flags
+# Set USE_OPENBLAS = 0 otherwise
+USE_OPENBLAS		= 1
+# Specify the path to OpenBLAS if necessary
+OPENBLASROOT ?= /opt/OpenBLAS
+
+# Set USE_LAPACK = 1 to compile with LAPACK
+# Set USE_LAPACK = 0 otherwise
+USE_LAPACK			= 1
+# Specify the path to LAPACK if necessary
+LAPACKROOT ?= /home/zhangyu/Download/lapack-3.12.0
+
+# Set USE_CBLAS = 1 to compile with LAPACK
+# Set USE_CBLAS = 0 otherwise
+USE_CBLAS			= 1
+# Specify the path to BLAS if necessary
+CBLASROOT ?= /home/zhangyu/Download/CBLAS
+
+# Set USE_OPENMP_SIMD = 1 to use omp simd
+# Set USE_OPENMP_SIMD = 0 otherwise
+USE_OPENMP_SIMD		= 0
+
+# Set USE_MEMFUNS = 1 to use memcpy() stead of assignment
+# Set USE_MEMFUNS = 0 otherwise
+USE_MEMFUNS			= 0
+
+# Set ARRAY_UNFOLD = 1 to unflod the arrays if possible when Vertices functions related
+# Set ARRAY_UNFOLD = 0 otherwise
+ARRAY_UNFOLD		= 0
+
+# Set FP16_FLAG = 1 to enable __pf16 format for Arrays with related Vertices and linalg functions
+# Set FP16_FLAG = 0 otherwise
+FP16_FLAG			= 0
+
+# Set LOW_MEMORY = 1 to store the xlsdft eigen_vectors in __pf16 format when FP16_FLAG = 1
+# Set LOW_MEMORY = 1 to store the xlsdft eigen_vectors in float format when FP16_FLAG = 0
+# Set LOW_MEMORY = 1 to generate nonlocal projectors everytime when needed
+# Set LOW_MEMORY = 0 otherwise
+LOW_MEMORY			= 1
+
+# Set ENABLE_TIMER = 1 to enable all the timer module
+# Set ENABLE_TIMER = 0 otherwise
+ENABLE_TIMER		= 1
+
+# Set USE_HBM = 1 to use hbm
+# Set USE_HBM = 0 otherwise
+USE_HBM			= 0
+# Specify the path HBMROOT if it's not already set to compile with hbm, e.g,
+HBMROOT ?= /path/to/hbm
+# export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${HBMROOT}/lib
+
+
+override CC=mpicxx
+# override CC=mpiicpx
+
+CFLAGS = -O3 -g -std=c++17
+CPPFLAGS = -Iinclude/
+BINBASE = ./a.out
+LDLIBS = -lm
+
+CPPFLAGS += -Wall -Wextra -Wpedantic -Werror -Wno-c99-extensions -DOMPI_SKIP_MPICXX 
+
+# Set USE_HYPRE = 1 to using hypre CG+BoomerAMG as poisson solver
+USE_HYPRE			= 0
+# Specify the paths of dependencies
+ifeq ($(USE_HYPRE), 1)
+	SOFT_HOME ?= /path/to/dependencies
+
+	HYPRE_F64_HOME ?= $(SOFT_HOME)/hypre/v3.0.0
+	HYPRE_F64_LIB  = $(HYPRE_F64_HOME)/lib
+	HYPRE_F64_INCLUDE = $(HYPRE_F64_HOME)/include
+	L_F64_HYPRE = -L$(HYPRE_F64_LIB)
+
+	JSON_HOME ?= $(SOFT_HOME)
+	JSON_INC = -I$(JSON_HOME)/jsoncpp/debug/include
+	JSON_LIB = -L$(JSON_HOME)/jsoncpp/debug/lib64
+endif
+
+ifeq ($(USE_HYPRE), 1)
+	CPPFLAGS += $(JSON_INC) -I$(HYPRE_F64_INCLUDE) -DUSE_HYPRE
+# 	CPPFLAGS += -DHYPRE_DEBUG
+	LDFLAGS += $(JSON_LIB) $(L_F64_HYPRE)
+	LDLIBS += -lHYPRE -ljsoncpp -lstdc++ -ldl
+endif
+
+# Set USE_SSTRUCTMG = 1 to using GMRES+SStructMG as poisson solver
+USE_SSTRUCTMG			= 0
+# Specify the paths of dependencies
+ifeq ($(USE_SSTRUCTMG), 1)
+	SOFT_HOME ?= /path/to/dependencies
+
+	JSON_HOME ?= $(SOFT_HOME)/jsoncpp/debug
+	JSON_INC = -I$(JSON_HOME)/include
+	JSON_LIB = -L$(JSON_HOME)/lib -ljsoncpp -Wl,-rpath=$(JSON_HOME)/lib
+
+# 	TYDSS_HOME = /A/u/jiazp/run/tydss_v1.0.0
+# 	TYDSS_INC = -I$(TYDSS_HOME)/include
+# 	TYDSS_LIB = -L$(TYDSS_HOME)/lib -ltydss -Wl,-rpath=$(TYDSS_HOME)/lib
+
+	EXT_LD = $(JSON_LIB) $(TYDSS_LIB)
+
+	SSTRUCTMG_HOME ?= /path/to/sstructmg
+	SSTRUCTMG_LIB  = $(SSTRUCTMG_HOME)/lib
+	SSTRUCTMG_INC = $(SSTRUCTMG_HOME)/include
+	L_SSTRUCTMG = -L$(SSTRUCTMG_LIB) -lSstructmg -Wl,-rpath=$(SSTRUCTMG_LIB) $(EXT_LD)
+
+	CPPFLAGS += -I$(JSON_INC)
+# 	CPPFLAGS += -I$(TYDSS_INC)
+	CPPFLAGS += -I$(SSTRUCTMG_INC) -DUSE_SSTRUCTMG
+# 	CPPFLAGS += -DSSTRUCTMG_DEBUG
+	LDFLAGS += $(L_SSTRUCTMG)
+	LDLIBS += -lstdc++ -ldl
+endif
+
+
+
+
+ifeq ($(USE_OPENMP_SIMD), 1)
+	ifeq ($(CC), mpicxx)
+		CFLAGS += -fopenmp
+	else ifeq ($(CC), mpiicpx)
+		CFLAGS += -qopenmp
+	endif
+	CPPFLAGS += -I${OPENMPROOT}/include -DUSE_OPENMP_SIMD
+	LDFLAGS  += -L${OPENMPROOT}/lib
+	ifeq ($(USE_OPENMP), 1)
+	CPPFLAGS += -I${OPENMPROOT}/include -DUSE_OPENMP
+	endif
+else ifeq ($(USE_OPENMP), 1)
+	ifeq ($(CC), mpicxx)
+		CFLAGS += -fopenmp
+	else ifeq ($(CC), mpiicpx)
+		CFLAGS += -qopenmp
+	endif
+	CPPFLAGS += -I${OPENMPROOT}/include -DUSE_OPENMP
+	LDFLAGS  += -L${OPENMPROOT}/lib
+endif
+
+ifeq ($(USE_KML), 1)
+    CPPFLAGS += -m64 -DUSE_KML
+#     CPPFLAGS += -march=armv9-a+sve+sme -mcpu=xxx
+    CPPFLAGS += -march=armv9-a+sve+sme
+    CPPFLAGS += -Wno-undefined-arm-streaming
+#     LDFLAGS  += -L${KMLROOT}/lib -L${KMLROOT}/lib/kblas/omp/
+    LDLIBS   += -rtlib=compiler-rt -lunwind
+    LDLIBS   += -lkscalapack -lkscalapack_full -lklapack -lklapack_full -lkblas
+else ifeq ($(USE_MKL), 1)
+
+	CPPFLAGS += -m64 -I${MKLROOT}/include -DUSE_MKL
+	# CPPFLAGS += -Wno-cast-function-type -DOMPI_SKIP_MPICXX
+	LDFLAGS  += -L${MKLROOT}/lib/intel64
+	LDLIBS   += -Wl,-rpath=${MKLROOT}/lib/intel64,--no-as-needed
+	LDLIBS   += -lmkl_scalapack_lp64 -lmkl_cdft_core -lmkl_intel_lp64
+	LDLIBS   += -lmkl_core
+	LDLIBS += -lmkl_blacs_intelmpi_lp64
+	# LDLIBS += -lmkl_blacs_openmpi_lp64
+	LDLIBS  += -lpthread -lm -ldl    
+    ifeq ($(USE_OPENMP), 1)
+		LDLIBS += -lmkl_gnu_thread -liomp5
+		# LDLIBS += -lmkl_intel_thread -liomp5
+	else
+		LDLIBS += -lmkl_sequential 
+	endif
+
+else ifeq ($(USE_SCALAPACK), 1)
+	ifeq ($(USE_OPENBLAS), 1)
+		CPPFLAGS += -I${OPENBLASROOT}/include -DUSE_OPENBLAS -DUSE_CBLAS -DUSE_LAPACK
+		LDFLAGS  += -L${OPENBLASROOT}/lib
+		LDLIBS   += -lopenblas -lpthread -Wl,-rpath=${OPENBLASROOT}/lib
+	else ifeq ($(USE_LAPACK), 1)
+		CPPFLAGS += -I${LAPACKROOT}/LAPACKE/include -DUSE_LAPACK
+		CPPFLAGS += -I${LAPACKROOT}/CBLAS/include -DUSE_CBLAS
+		LDFLAGS  += -L${LAPACKROOT}
+		LDLIBS   += -llapacke -llapack -lcblas -lrefblas
+	else ifeq ($(USE_CBLAS), 1)
+		CPPFLAGS += -I${CBLASROOT}/include -DUSE_CBLAS
+		LDFLAGS  += -L${CBLASROOT}/lib
+		LDLIBS   += -lcblas -lblas
+	endif
+	CPPFLAGS += -DUSE_SCALAPACK
+	LDFLAGS  += -L$(SCALAPACKROOT)
+	LDLIBS   += -lscalapack
+	LDLIBS   += -lgfortran
+else ifeq ($(USE_OPENBLAS), 1)
+	CPPFLAGS += -I${OPENBLASROOT}/include -DUSE_OPENBLAS -DUSE_CBLAS -DUSE_LAPACK
+	LDFLAGS  += -L${OPENBLASROOT}/lib
+	LDLIBS   += -lopenblas -lpthread -lgfortran -Wl,-rpath=${OPENBLASROOT}/lib
+else ifeq ($(USE_LAPACK), 1)
+	CPPFLAGS += -I${LAPACKROOT}/LAPACKE/include -DUSE_LAPACK
+	CPPFLAGS += -I${LAPACKROOT}/CBLAS/include -DUSE_CBLAS
+	LDFLAGS  += -L${LAPACKROOT}
+	LDLIBS   += -llapacke -llapack -lcblas -lrefblas -lgfortran
+else ifeq ($(USE_CBLAS), 1)
+	CPPFLAGS += -I${CBLASROOT}/include -DUSE_CBLAS
+	LDFLAGS  += -L${CBLASROOT}/lib
+	LDLIBS   += -lcblas -lblas -lgfortran
+endif
+
+# FFTW support for DST preconditioner
+ifeq ($(USE_KML), 1)
+# 	KML FFTW interface (placeholder for future)
+# 	CPPFLAGS += -DUSE_KML
+	LDLIBS += -lfftw3 -lfftw3f
+else ifeq ($(USE_MKL), 1)
+# 	MKL provides FFTW interface - add include path for fftw3.h
+	CPPFLAGS += -I${MKLROOT}/include/fftw
+else ifeq ($(USE_FFTW), 1)
+# 	Standalone FFTW (has direct DST-I support via FFTW_RODFT00)
+	CPPFLAGS += -DUSE_FFTW
+	ifdef FFTWROOT
+		CPPFLAGS += -I${FFTWROOT}/include
+		LDFLAGS  += -L${FFTWROOT}/lib
+	endif
+	LDLIBS   += -lfftw3 -lfftw3f	
+endif
+
+ifeq ($(USE_MEMFUNS), 1)
+	CPPFLAGS += -DUSE_MEMFUNS
+endif
+
+ifeq ($(ARRAY_UNFOLD), 1)
+	CPPFLAGS += -DARRAY_UNFOLD
+endif
+
+ifeq ($(FP16_FLAG), 1)
+	CPPFLAGS += -DFP16_FLAG
+endif
+
+ifeq ($(LOW_MEMORY), 1)
+	CPPFLAGS += -DLOW_MEMORY
+endif
+
+ifeq ($(ENABLE_TIMER), 1)
+	CPPFLAGS += -DENABLE_TIMER
+endif
+
+ifeq ($(USE_HBM), 1)
+	CPPFLAGS += -I${HBMROOT}/include -DUSE_HBM
+	LDLIBS += -lmemkind -lhwloc -lnuma -L${HBMROOT}/lib
+endif
