@@ -6,7 +6,9 @@
 #include "mixing.h"
 #include "parallel_vertices.h"
 #include "aar.h"
+#ifdef USE_HYPRE
 #include "wrapper_hypre.h"
+#endif
 #include "wrapper_sstructmg.h"
 
 template<typename T>

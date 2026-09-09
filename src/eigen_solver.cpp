@@ -1,5 +1,11 @@
 #include "eigen_solver.h"
 
+#include <cstring>
+#include <type_traits>
+
+#include "chefsi_layout.h"
+#include "nloc_fixture_dump.hpp"
+
 #ifdef ENABLE_EIGEN_SOLVER_TIMER
 #pragma message("Building with ENABLE_EIGEN_SOLVER_TIMER.")
 Eigen_solver_timer::Eigen_solver_timer() {}
@@ -755,6 +761,142 @@ void Eigen_solver<T>::run_mp(T*& eigen_vectors_in, T*& eigen_vectors_out, T cons
             this->eigen_solver_timer.low_memory_chi.stop();
         #else
             // this->effective_potential_nloc.destructor();
+            this->effective_potential_nloc.destructor_mp();
+        #endif //ENABLE_EIGEN_SOLVER_TIMER
+    #endif
+
+    if (this->domain_vertices.get_comm_rank() == 0 && print_flag) {
+        this->print_runtime_result();
+    }
+
+    #ifdef ENABLE_EIGEN_SOLVER_TIMER
+        this->eigen_solver_timer.eigen_solver.stop();
+        if (this->domain_vertices.get_comm_rank() == 0 && print_flag) this->eigen_solver_timer.show();
+    #endif //ENABLE_EIGEN_SOLVER_TIMER
+}
+
+template<typename T>
+void Eigen_solver<T>::run_mp_opt(T const* const effective_potentail_loc, const bool print_flag) {
+    constexpr size_t GB = 1024 * 1024 * 1024 / sizeof(T);
+    Memory_pool<T, Fast_memory> pool_fast(4 * GB);
+    Memory_pool<T, Capacity_memory> pool_cap(4 * GB);
+    Memory_pool_scope<Memory_pool<T, Fast_memory>> scope_fast(pool_fast);
+    Memory_pool_scope<Memory_pool<T, Capacity_memory>> scope_cap(pool_cap);
+    const uint nb = this->domain_vertices.get_4D_local_vertices().nb;
+    const uint K = this->domain_vertices.get_3D_local_vertices().get_size();
+    if constexpr (std::is_same_v<T, double>) {
+        const size_t wf_elems = chefsi_layout::wf_stride(K, nb);
+        double* packed_in = pool_fast.allocate(wf_elems);
+        double* packed_out = pool_fast.allocate(wf_elems);
+        std::memset(packed_in, 0, wf_elems * sizeof(double));
+        std::memset(packed_out, 0, wf_elems * sizeof(double));
+        chefsi_layout::tile_16(nb, K, packed_in, this->eigen_vectors.data);
+        double* packed_in_ptr = packed_in;
+        double* packed_out_ptr = packed_out;
+        this->run_mp_opt(packed_in_ptr, packed_out_ptr, effective_potentail_loc, print_flag,
+                         pool_fast, pool_cap);
+        chefsi_layout::untile_16_production(nb, K, this->eigen_vectors.data,
+                                            packed_in_ptr);
+    } else {
+        assert(false && "run_mp_opt is implemented for double only");
+    }
+}
+
+template<typename T>
+void Eigen_solver<T>::run_mp_opt(T*& eigen_vectors_in, T*& eigen_vectors_out,
+                                 T const* const effective_potentail_loc,
+                                 const bool print_flag,
+                                 Memory_pool<T, Fast_memory>& pool_fast,
+                                 Memory_pool<T, Capacity_memory>& pool_cap) {
+    #ifdef ENABLE_EIGEN_SOLVER_TIMER
+        this->eigen_solver_timer.reset();
+        this->eigen_solver_timer.eigen_solver.start();
+    #endif //ENABLE_EIGEN_SOLVER_TIMER
+
+    const bool nchi_diag = xlsdft_nchi_diag_enabled();
+    this->element_workload_diag = Xlsdft_element_workload_diag{};
+
+    std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+    double chi_build_ms = 0.0;
+    #ifdef LOW_MEMORY
+        {
+            const auto chi_begin = std::chrono::steady_clock::now();
+        #ifdef ENABLE_EIGEN_SOLVER_TIMER
+            this->eigen_solver_timer.low_memory_chi.start();
+        #endif //ENABLE_EIGEN_SOLVER_TIMER
+            this->effective_potential_nloc.init_mp(print_flag, pool_fast, pool_cap);
+        #ifdef ENABLE_EIGEN_SOLVER_TIMER
+            this->eigen_solver_timer.low_memory_chi.stop();
+        #endif //ENABLE_EIGEN_SOLVER_TIMER
+            chi_build_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - chi_begin).count();
+        }
+    #endif
+
+    if (nchi_diag) {
+        this->element_workload_diag.nchi =
+            effective_potential_nloc_nchi(this->effective_potential_nloc);
+        this->element_workload_diag.n_projectors =
+            this->effective_potential_nloc.nloc_projectors.size();
+        this->element_workload_diag.projector_bytes =
+            effective_potential_nloc_projector_bytes(this->effective_potential_nloc);
+        this->element_workload_diag.chi_build_ms = chi_build_ms;
+    }
+
+    if constexpr (std::is_same_v<T, double>) {
+        nloc_fixture_dump::maybe_dump_after_nloc_init(
+            this->effective_potential_nloc,
+            reinterpret_cast<const double*>(eigen_vectors_in),
+            this->domain_vertices.get_3D_local_vertices().get_size(),
+            this->domain_vertices.get_4D_local_vertices().nb,
+            static_cast<double>(this->mesh_control.delta_V),
+            static_cast<int>(this->domain_vertices.get_comm_rank()),
+            this->domain_vertices.comm);
+    }
+
+    #ifdef ENABLE_EIGEN_SOLVER_TIMER
+        this->eigen_solver_timer.eigen_solver_kernel.start();
+    #endif //ENABLE_EIGEN_SOLVER_TIMER
+    if (this->eigen_solver_control.method == 0) {
+        if constexpr (std::is_same_v<T, double>) {
+            this->chefsi.run_mp_opt(reinterpret_cast<double*&>(eigen_vectors_in),
+                                    reinterpret_cast<double*&>(eigen_vectors_out),
+                                    this->eigen_values.data, effective_potentail_loc,
+                                    this->effective_potential_nloc, print_flag, pool_fast,
+                                    pool_cap);
+        } else {
+            assert(false && "run_mp_opt is implemented for double only");
+        }
+    } else {
+        assert(this->eigen_solver_control.method == 0);
+    }
+    #ifdef ENABLE_EIGEN_SOLVER_TIMER
+        this->eigen_solver_timer.eigen_solver_kernel.stop();
+    #endif //ENABLE_EIGEN_SOLVER_TIMER
+    std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+
+    if (nchi_diag) {
+    #ifdef ENABLE_CHEFSI_TIMER
+        this->element_workload_diag.filter_nloc_ms =
+            this->chefsi.chefsi_timer.filter_nloc.time_cost_millisecond();
+        this->element_workload_diag.chefsi_ms =
+            this->chefsi.chefsi_timer.chefsi.time_cost_millisecond();
+    #endif //ENABLE_CHEFSI_TIMER
+        this->element_workload_diag.eigen_ms =
+            std::chrono::duration<double, std::milli>(end - begin).count();
+        this->element_workload_diag.valid = true;
+    }
+    if (this->domain_vertices.get_comm_rank() == 0 && print_flag) {
+        std::cout << "The Eigen_solver run_mp_opt took " << Tools::time_cost(begin, end)
+                  << "." << std::endl;
+    }
+
+    #ifdef LOW_MEMORY
+        #ifdef ENABLE_EIGEN_SOLVER_TIMER
+            this->eigen_solver_timer.low_memory_chi.start();
+            this->effective_potential_nloc.destructor_mp();
+            this->eigen_solver_timer.low_memory_chi.stop();
+        #else
             this->effective_potential_nloc.destructor_mp();
         #endif //ENABLE_EIGEN_SOLVER_TIMER
     #endif

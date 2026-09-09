@@ -1,6 +1,11 @@
 #include <stdio.h>
 #include "linalg.h"
 
+#if defined(XLSDFT_BACKEND_FREE)
+#include "xlsdft_backend.h"
+#include <omp.h>
+#endif
+
 #define STR(x) #x
 #define EXPAND(x) x
 // #define STR_EXPAND(x) STR(x)
@@ -1952,6 +1957,7 @@ void matrix_product_general(const T* ptr_A, const uint is_Col_Maj_A,
             break;
         default :
             assert(0 && "The matrix should be Col(1) or Row(0) Major!");
+            return;
     }
     int64_t length = m * n;
     #if (defined(USE_OPENMP_SIMD) && defined(USE_OPENMP))
@@ -2070,6 +2076,7 @@ void matrix_product_general(const T* ptr_A, const uint is_Col_Maj_A,
             break;
         default :
             assert(0 && "The matrix should be Col(1) or Row(0) Major!");
+            return;
     }
     int64_t length = m * n;
     #if (defined(USE_OPENMP_SIMD) && defined(USE_OPENMP))
@@ -2192,6 +2199,7 @@ void matrix_product_general(const T* ptr_A, const uint is_Col_Maj_A,
             break;
         default :
             assert(0 && "The matrix should be Col(1) or Row(0) Major!");
+            return;
     }
     int64_t length = m * n;
     #if (defined(USE_OPENMP_SIMD) && defined(USE_OPENMP))
@@ -2315,6 +2323,7 @@ void matrix_product_general(const T* ptr_A, const uint is_Col_Maj_A,
             break;
         default :
             assert(0 && "The matrix should be Col(1) or Row(0) Major!");
+            return;
     }
     int64_t length = m * n;
     #if (defined(USE_OPENMP_SIMD) && defined(USE_OPENMP))
@@ -2368,7 +2377,29 @@ void cblas__gemv(const CBLAS_ORDER Layout, const CBLAS_TRANSPOSE trans,
                 const double alpha, double const* const a, const int64_t lda,
                 const double *x, const int64_t incx,
                 const double beta, double* const y, const int64_t incy) {
+#if defined(XLSDFT_BACKEND_FREE)
+    (void)lda;
+    if (Layout == CblasColMajor && incx == 1 && incy == 1) {
+        if (trans == CblasTrans && alpha == 1.0 && beta == 0.0) {
+            Linalg::matrix_vector_product(a, 0, x, y, static_cast<uint>(m),
+                                          static_cast<uint>(n));
+            return;
+        }
+        if (trans == CblasNoTrans) {
+            if (beta == 0.0) {
+                Linalg::matrix_vector_product(a, 1, x, y, static_cast<uint>(m),
+                                              static_cast<uint>(n), alpha);
+            } else {
+                Linalg::matrix_vector_product(a, 1, x, y, static_cast<uint>(m),
+                                              static_cast<uint>(n), alpha, beta);
+            }
+            return;
+        }
+    }
+    return;
+#else
     cblas_dgemv(Layout, trans, m, n, alpha, a, lda, x, incx, beta, y, incy);
+#endif
     return;
 }
 template<>
@@ -2481,8 +2512,35 @@ void cblas__gemm(const CBLAS_ORDER C_LAYOUT, const CBLAS_TRANSPOSE A_TRANSPOSE, 
                 const double alpha, double const* const ptr_A, const int64_t A_ld,
                 double const* const ptr_B, const int64_t B_ld,
                 const double beta, double* const ptr_C, const int64_t C_ld) {
+#if defined(XLSDFT_BACKEND_FREE)
+    (void)A_ld;
+    (void)B_ld;
+    (void)C_ld;
+    if (C_LAYOUT == CblasColMajor) {
+        const uint is_A = (A_TRANSPOSE == CblasNoTrans) ? 1U : 0U;
+        const uint is_B = (B_TRANSPOSE == CblasNoTrans) ? 1U : 0U;
+        if (alpha == 1.0 && beta == 0.0) {
+            Linalg::matrix_product(ptr_A, is_A, ptr_B, is_B, ptr_C, 1,
+                                   static_cast<uint>(m), static_cast<uint>(n),
+                                   static_cast<uint>(k));
+            return;
+        }
+        if (beta == 0.0) {
+            Linalg::matrix_product(ptr_A, is_A, ptr_B, is_B, ptr_C, 1,
+                                   static_cast<uint>(m), static_cast<uint>(n),
+                                   static_cast<uint>(k), alpha);
+            return;
+        }
+        Linalg::matrix_product(ptr_A, is_A, ptr_B, is_B, ptr_C, 1,
+                               static_cast<uint>(m), static_cast<uint>(n),
+                               static_cast<uint>(k), alpha, beta);
+        return;
+    }
+    return;
+#else
     cblas_dgemm(C_LAYOUT, A_TRANSPOSE, B_TRANSPOSE, m, n, k, alpha,
         ptr_A, A_ld, ptr_B, B_ld, beta, ptr_C, C_ld);
+#endif
     return;
 }
 template<>
@@ -2595,10 +2653,23 @@ void cblas__syrk(const CBLAS_ORDER layout, const CBLAS_UPLO uplo, const CBLAS_TR
 }
 template<>
 void cblas__syrk(const CBLAS_ORDER layout, const CBLAS_UPLO uplo, const CBLAS_TRANSPOSE trans,
-                        const int64_t n, const int64_t k,
-                        const double alpha, double const* const ptr_A, const int64_t A_ld,
-                        const double beta, double* const ptr_C, const int64_t C_ld) {
+                const int64_t n, const int64_t k,
+                const double alpha, double const* const ptr_A, const int64_t A_ld,
+                const double beta, double* const ptr_C, const int64_t C_ld) {
+#if defined(XLSDFT_BACKEND_FREE)
+    (void)A_ld;
+    (void)C_ld;
+    if (layout == CblasColMajor && uplo == CblasUpper && trans == CblasTrans &&
+        alpha == 1.0 && beta == 0.0) {
+        Linalg::matrix_product(ptr_A, 0, ptr_A, 1, ptr_C, 1,
+                               static_cast<uint>(n), static_cast<uint>(n),
+                               static_cast<uint>(k));
+        return;
+    }
+    return;
+#else
     cblas_dsyrk(layout, uplo, trans, n, k, alpha, ptr_A, A_ld, beta, ptr_C, C_ld);
+#endif
     return;
 }
 template<>
@@ -2795,6 +2866,7 @@ void matrix_product_cblas(const T* ptr_A, const uint is_Col_Maj_A,
             break;
         default :
             assert(0 && "The matrix should be Col(1) or Row(0) Major!");
+            return;
     }
     #ifdef USE_OPENMP
         #ifdef USE_MY_OPENMP_BLAS
@@ -2893,7 +2965,7 @@ template void matrix_product_cblas<double>(const double* ptr_A, const uint is_Co
                                                    const double alpha, const double beta, const double gamma);
 #endif // USE_CBLAS
 
-#ifdef USE_LAPACK
+#if defined(USE_LAPACK) && !defined(XLSDFT_BACKEND_FREE)
 template<>
 lapack_int LAPACKE__gelsd(const int matrix_layout, const lapack_int m, const lapack_int n,
                             const lapack_int nrhs, double *a, const lapack_int lda,
@@ -3186,6 +3258,201 @@ lapack_int LAPACKE__sterf_org(const lapack_int order, float* d, float* e) {
 template<>
 lapack_int LAPACKE__sterf_org(const lapack_int order, double* d, double* e) {
     return LAPACKE_dsterf(order, d, e);
+}
+
+#elif defined(USE_LAPACK) && defined(XLSDFT_BACKEND_FREE)
+
+namespace {
+
+constexpr int kLvtxPulayHistoryMax = 64;
+constexpr std::size_t kLvtxPulayGelsdWorkspaceDoubles =
+    2U * static_cast<std::size_t>(kLvtxPulayHistoryMax) *
+        static_cast<std::size_t>(kLvtxPulayHistoryMax) +
+    6U * static_cast<std::size_t>(kLvtxPulayHistoryMax);
+constexpr std::size_t kLvtxDsygvdWorkspaceDoubles =
+    static_cast<std::size_t>(Xlsdft_backend::dsygvd_max_n) *
+        static_cast<std::size_t>(Xlsdft_backend::dsygvd_max_n) +
+    6U * static_cast<std::size_t>(Xlsdft_backend::dsygvd_max_n) +
+    2U * static_cast<std::size_t>(Xlsdft_backend::dsygvd_max_n) * 16U;
+
+class AlignedWorkspace {
+public:
+    explicit AlignedWorkspace(const std::size_t count)
+        : data_(new (std::align_val_t(64)) double[count]) {}
+
+    ~AlignedWorkspace() {
+        ::operator delete[](data_, std::align_val_t(64));
+    }
+
+    AlignedWorkspace(const AlignedWorkspace&) = delete;
+    AlignedWorkspace& operator=(const AlignedWorkspace&) = delete;
+
+    double* data() noexcept { return data_; }
+
+private:
+    double* data_;
+};
+
+double* lvtx_pulay_gelsd_workspace() {
+    thread_local AlignedWorkspace workspace(kLvtxPulayGelsdWorkspaceDoubles);
+    return workspace.data();
+}
+
+double* lvtx_dsygvd_workspace() {
+    thread_local AlignedWorkspace workspace(kLvtxDsygvdWorkspaceDoubles);
+    return workspace.data();
+}
+
+}  // namespace
+
+template<>
+lapack_int LAPACKE__gelsd_org(const int matrix_layout, const lapack_int m, const lapack_int n,
+                            const lapack_int nrhs, double *a, const lapack_int lda,
+                            double *b, const lapack_int ldb, double *s, double rcond,
+                            lapack_int* rank) {
+    if (matrix_layout != LAPACK_COL_MAJOR || nrhs != 1 || m != n) {
+        return -1;
+    }
+    (void)ldb;
+    if (omp_in_parallel()) {
+        return -1;
+    }
+    const std::size_t workspace_doubles =
+        Xlsdft_backend::pulay_gelsd_workspace_doubles(m);
+    return Xlsdft_backend::pulay_gelsd(
+        m, a, lda, b, s, rcond, rank, lvtx_pulay_gelsd_workspace(),
+        workspace_doubles);
+}
+template<>
+lapack_int LAPACKE__gelsd_org(const int matrix_layout, const lapack_int m, const lapack_int n,
+                            const lapack_int nrhs, float *a, const lapack_int lda,
+                            float *b, const lapack_int ldb, float *s, float rcond,
+                            lapack_int* rank) {
+    (void)matrix_layout; (void)m; (void)n; (void)nrhs; (void)a; (void)lda;
+    (void)b; (void)ldb; (void)s; (void)rcond; (void)rank;
+    return -1;
+}
+template<>
+lapack_int LAPACKE__gelsd(const int matrix_layout, const lapack_int m, const lapack_int n,
+                            const lapack_int nrhs, double *a, const lapack_int lda,
+                            double *b, const lapack_int ldb, double *s, double rcond,
+                            lapack_int* rank) {
+    return LAPACKE__gelsd_org(matrix_layout, m, n, nrhs, a, lda, b, ldb, s, rcond, rank);
+}
+template<>
+lapack_int LAPACKE__gelsd(const int matrix_layout, const lapack_int m, const lapack_int n,
+                            const lapack_int nrhs, float *a, const lapack_int lda,
+                            float *b, const lapack_int ldb, float *s, float rcond,
+                            lapack_int* rank) {
+    return LAPACKE__gelsd_org(matrix_layout, m, n, nrhs, a, lda, b, ldb, s, rcond, rank);
+}
+template<>
+lapack_int LAPACKE__gelsd(const int matrix_layout, const lapack_int m, const lapack_int n,
+                            const lapack_int nrhs, std::complex<float> *a,
+                            const lapack_int lda, std::complex<float> *b,
+                            const lapack_int ldb, float* s, float rcond,
+                            lapack_int* rank) {
+    (void)matrix_layout; (void)m; (void)n; (void)nrhs; (void)a; (void)lda;
+    (void)b; (void)ldb; (void)s; (void)rcond; (void)rank;
+    return -1;
+}
+template<>
+lapack_int LAPACKE__gelsd(const int matrix_layout, const lapack_int m, const lapack_int n,
+                            const lapack_int nrhs, std::complex<double> *a,
+                            const lapack_int lda, std::complex<double> *b,
+                            const lapack_int ldb, double* s, double rcond,
+                            lapack_int* rank) {
+    (void)matrix_layout; (void)m; (void)n; (void)nrhs; (void)a; (void)lda;
+    (void)b; (void)ldb; (void)s; (void)rcond; (void)rank;
+    return -1;
+}
+
+template<>
+lapack_int LAPACKE__sygvd_org(const int matrix_layout, const lapack_int itype, char jobz,
+                    char uplo, const lapack_int n, double* a, const lapack_int lda,
+                    double* b, const lapack_int ldb, double* w) {
+    if (matrix_layout != LAPACK_COL_MAJOR || itype != 1 || jobz != 'V' ||
+        (uplo != 'U' && uplo != 'u') || n < 0 ||
+        n > Xlsdft_backend::dsygvd_max_n) {
+        return -1;
+    }
+    if (n == 0) {
+        return 0;
+    }
+    const std::size_t workspace_doubles =
+        Xlsdft_backend::dsygvd_workspace_doubles(n);
+    int nthreads = omp_get_max_threads();
+    if (nthreads > Xlsdft_backend::dsygvd_max_threads) {
+        nthreads = Xlsdft_backend::dsygvd_max_threads;
+    }
+    if (nthreads < 1) {
+        nthreads = 1;
+    }
+    return Xlsdft_backend::dsygvd_upper(
+        n, a, lda, b, ldb, w, lvtx_dsygvd_workspace(), workspace_doubles,
+        nthreads);
+}
+template<>
+lapack_int LAPACKE__sygvd_org(const int matrix_layout, const lapack_int itype, char jobz,
+                            char uplo, const lapack_int n, float* a, const lapack_int lda,
+                            float* b, const lapack_int ldb, float* w) {
+    (void)matrix_layout; (void)itype; (void)jobz; (void)uplo; (void)n;
+    (void)a; (void)lda; (void)b; (void)ldb; (void)w;
+    return -1;
+}
+template<>
+lapack_int LAPACKE__sygvd(const int matrix_layout, const lapack_int itype, char jobz,
+                    char uplo, const lapack_int n, double* a, const lapack_int lda,
+                    double* b, const lapack_int ldb, double* w) {
+    return LAPACKE__sygvd_org(matrix_layout, itype, jobz, uplo, n, a, lda, b, ldb, w);
+}
+template<>
+lapack_int LAPACKE__sygvd(const int matrix_layout, const lapack_int itype, char jobz,
+                            char uplo, const lapack_int n, float* a, const lapack_int lda,
+                            float* b, const lapack_int ldb, float* w) {
+    return LAPACKE__sygvd_org(matrix_layout, itype, jobz, uplo, n, a, lda, b, ldb, w);
+}
+template<>
+lapack_int LAPACKE__hygvd(const int matrix_layout, const lapack_int itype, char jobz,
+                            char uplo, const lapack_int n, std::complex<float>* a,
+                            const lapack_int lda, std::complex<float>* b,
+                            const lapack_int ldb, float* w) {
+    (void)matrix_layout; (void)itype; (void)jobz; (void)uplo; (void)n;
+    (void)a; (void)lda; (void)b; (void)ldb; (void)w;
+    return -1;
+}
+template<>
+lapack_int LAPACKE__hygvd(const int matrix_layout, const lapack_int itype, char jobz,
+                            char uplo, const lapack_int n, std::complex<double>* a,
+                            const lapack_int lda, std::complex<double>* b,
+                            const lapack_int ldb, double* w) {
+    (void)matrix_layout; (void)itype; (void)jobz; (void)uplo; (void)n;
+    (void)a; (void)lda; (void)b; (void)ldb; (void)w;
+    return -1;
+}
+
+template<>
+lapack_int LAPACKE__sterf_org(const lapack_int order, float* d, float* e) {
+    (void)order; (void)d; (void)e;
+    return -1;
+}
+template<>
+lapack_int LAPACKE__sterf_org(const lapack_int order, double* d, double* e) {
+    if (order < 0 || order > Xlsdft_backend::dsterf_max_n) {
+        return -1;
+    }
+    if (order == 0) {
+        return 0;
+    }
+    return Xlsdft_backend::dsterf(order, d, e);
+}
+template<>
+lapack_int LAPACKE__sterf(const lapack_int order, float* d, float* e) {
+    return LAPACKE__sterf_org(order, d, e);
+}
+template<>
+lapack_int LAPACKE__sterf(const lapack_int order, double* d, double* e) {
+    return LAPACKE__sterf_org(order, d, e);
 }
 
 #endif //USE_LAPACK

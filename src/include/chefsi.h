@@ -25,13 +25,18 @@ public:
     Timer filter_lap;
     Timer filter_nloc;
     Timer H_psi;
-    Timer projection;
+    Timer projection_gemm;
+    Timer projection_syrk;
     Timer diagonalization;
     Timer rotation;
     Chefsi_timer();
     ~Chefsi_timer();
     void reset();
     void show(std::ostream& output = std::cout) const;
+    double projection_time_cost_millisecond() const {
+        return projection_gemm.time_cost_millisecond() +
+               projection_syrk.time_cost_millisecond();
+    }
     Chefsi_timer& operator+=(const Chefsi_timer& other) {
         chefsi          += other.chefsi;
         lanczos         += other.lanczos;
@@ -41,7 +46,8 @@ public:
         filter_lap      += other.filter_lap;
         filter_nloc     += other.filter_nloc;
         H_psi           += other.H_psi;
-        projection      += other.projection;
+        projection_gemm += other.projection_gemm;
+        projection_syrk += other.projection_syrk;
         diagonalization += other.diagonalization;
         rotation        += other.rotation;
 
@@ -230,9 +236,18 @@ public:
             calc_flops(chefsi_flop_counter.H_psi,
                        chefsi_timer.H_psi);
 
-        local_flops[PROJECTION] =
-            calc_flops(chefsi_flop_counter.projection,
-                       chefsi_timer.projection);
+        {
+            const double projection_time =
+                std::chrono::duration<double>(
+                    chefsi_timer.projection_gemm.elapsed).count() +
+                std::chrono::duration<double>(
+                    chefsi_timer.projection_syrk.elapsed).count();
+            local_flops[PROJECTION] =
+                projection_time > 0.0
+                    ? chefsi_flop_counter.projection / projection_time /
+                          1.0e9
+                    : 0.0;
+        }
 
         local_flops[DIAGONALIZATION] =
             calc_flops(chefsi_flop_counter.diagonalization,
@@ -325,6 +340,10 @@ public:
     Chefsi_performance chefsi_performance;
     #endif //ENABLE_CHEFSI_TIMER
     bool is_very_first = true;
+    // Rank-shared, persistent third panel supplied by the XLSDFT allocation stage.
+    // Null preserves the original temporary allocation path.
+    double* opt_third_panel = nullptr;
+    size_t opt_third_panel_elems = 0;
     #if (defined(USE_MKL) || defined(USE_SCALAPACK))
         int icontxt_whole_comm = -1;  //the whole comm
         int icontxt_intra_band = -1;  //share some local_3d_domain but different bands
@@ -453,6 +472,7 @@ public:
             Memory_pool<T, Fast_memory>& pool_fast, Memory_pool<T, Capacity_memory>& pool_cap);
     void chebyshev_filtering_column_wise_mp(T*& eigen_vectors,
                                             T*& eigen_vectors_buffer,
+                                            T* const eigen_vectors_m1,
                                             T const* const Vloc,
                                             const Effective_potential_nloc<T>& Vnloc,
                                             const bool print_flag,
@@ -463,11 +483,47 @@ public:
                                 const bool print_flag,
                                 Memory_pool<T, Fast_memory>& pool_fast,
                                 Memory_pool<T, Capacity_memory>& pool_cap);
-    void subspace_diagonalization_mp(T* const hp, T* const mp, T* const eigen_values, const bool print_flag = true);
+    void subspace_diagonalization_mp(T* const hp, T* const mp, T* const eigen_values,
+                                     const bool print_flag,
+                                     Memory_pool<T, Fast_memory>& pool_fast,
+                                     Memory_pool<T, Capacity_memory>& pool_cap);
+    void subspace_diagonalization_mp_opt(T* const hp, T* const mp,
+                                         T* const eigen_values,
+                                         const bool print_flag,
+                                         Memory_pool<T, Fast_memory>& pool_fast,
+                                         Memory_pool<T, Capacity_memory>& pool_cap);
     void subspace_rotation_mp(T const* const eigen_vectors_in, T* const eigen_vectors_out,
                               T const* const qp, const bool print_flag,
                               Memory_pool<T, Fast_memory>& pool_fast,
                               Memory_pool<T, Capacity_memory>& pool_cap);
+
+    // run_mp_opt — packed tile layouts, SME kernels (double only in chefsi_opt.cpp)
+    void run_mp_opt(T*& eigen_vectors_in, T*& eigen_vectors_out, T* const eigen_values,
+                    T const* const Vloc, const Effective_potential_nloc<T>& Vnloc,
+                    const bool print_flag, Memory_pool<T, Fast_memory>& pool_fast,
+                    Memory_pool<T, Capacity_memory>& pool_cap);
+    void chebyshev_filtering_column_wise_mp_opt(
+        double*& psi, double*& psi_buf, double*& psi_m1, T const* const Vloc,
+        const Effective_potential_nloc<T>& Vnloc, const bool print_flag,
+        Memory_pool<T, Fast_memory>& pool_fast,
+        Memory_pool<T, Capacity_memory>& pool_cap);
+    void hamiltonian_product_mp_opt(double* h_packed, const double* psi_tile16,
+                                    double* psi_tile16t_out, T const* const Vloc,
+                                    const Effective_potential_nloc<T>& Vnloc,
+                                    const bool print_flag,
+                                    Memory_pool<T, Fast_memory>& pool_fast,
+                                    Memory_pool<T, Capacity_memory>& pool_cap);
+    void project_hamiltonian_mp_opt(const double* psi_tile16t,
+                                    const double* h_tile32t, double* hp, double* mp,
+                                    const bool print_flag,
+                                    Memory_pool<T, Fast_memory>& pool_fast,
+                                    Memory_pool<T, Capacity_memory>& pool_cap);
+    void subspace_rotation_mp_opt(double* psi_tile16_out,
+                                  const double* psi_tile16t_in,
+                                  double* transpose_scratch, double* qp,
+                                  const bool print_flag,
+                                  Memory_pool<T, Fast_memory>& pool_fast,
+                                  Memory_pool<T, Capacity_memory>& pool_cap);
 
     double evalutate_flops();
     void init(const bool* is_periodic, const bool& is_rand_fixed);

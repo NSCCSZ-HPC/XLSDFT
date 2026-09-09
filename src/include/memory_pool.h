@@ -44,6 +44,7 @@ private:
     T* buffer = nullptr;
     size_t capacity = 0;
     size_t offset = 0;
+    size_t persistent_floor_ = 0;
 public:
     Memory_pool() = default;
     explicit Memory_pool(size_t n) {
@@ -155,6 +156,21 @@ public:
     {
         assert(old_offset <= offset);
         offset = old_offset;
+        if (offset < persistent_floor_) {
+            offset = persistent_floor_;
+        }
+    }
+    T* reserve_persistent(size_t n) {
+        T* ptr = allocate(n);
+        persistent_floor_ = mark();
+        return ptr;
+    }
+    void set_persistent_floor(size_t floor) {
+        assert(floor <= offset);
+        persistent_floor_ = floor;
+    }
+    size_t persistent_floor() const {
+        return persistent_floor_;
     }
     void reset()
     {
@@ -238,6 +254,9 @@ public:
     ~Memory_pool_scope()
     {
         pool.release(offset);
+        if (pool.persistent_floor() > 0 && pool.mark() < pool.persistent_floor()) {
+            pool.release(pool.persistent_floor());
+        }
     }
     Memory_pool_scope(const Memory_pool_scope&) = delete;
     Memory_pool_scope& operator=(const Memory_pool_scope&) = delete;

@@ -14,7 +14,8 @@ void Chefsi_timer::reset() {
     this->filter_lap.reset();
     this->filter_nloc.reset();
     this->H_psi.reset();
-    this->projection.reset();
+    this->projection_gemm.reset();
+    this->projection_syrk.reset();
     this->diagonalization.reset();
     this->rotation.reset();
     return;
@@ -28,7 +29,8 @@ void Chefsi_timer::show(std::ostream& output) const {
     output << std::left << std::setw(20) << "    filter_lap"     << ": " << this->filter_lap.time_cost_millisecond() << " [ms]" << std::endl;
     output << std::left << std::setw(20) << "    filter_nloc"    << ": " << this->filter_nloc.time_cost_millisecond() << " [ms]" << std::endl;
     output << std::left << std::setw(20) << "  H_psi"            << ": " << this->H_psi.time_cost_millisecond() << " [ms]" << std::endl;
-    output << std::left << std::setw(20) << "  projection"       << ": " << this->projection.time_cost_millisecond() << " [ms]" << std::endl;
+    output << std::left << std::setw(20) << "  projection_gemm"  << ": " << this->projection_gemm.time_cost_millisecond() << " [ms]" << std::endl;
+    output << std::left << std::setw(20) << "  projection_syrk"  << ": " << this->projection_syrk.time_cost_millisecond() << " [ms]" << std::endl;
     output << std::left << std::setw(20) << "  diagonalization"  << ": " << this->diagonalization.time_cost_millisecond() << " [ms]" << std::endl;
     output << std::left << std::setw(20) << "  rotation "        << ": " << this->rotation.time_cost_millisecond() << " [ms]" << std::endl;
     return;
@@ -1023,7 +1025,7 @@ void Chefsi<T>::project_hamiltonian(T* const& __restrict__ eigen_vectors, T* con
     #ifdef ENABLE_CHEFSI_TIMER
         #pragma omp master
         {
-            this->chefsi_timer.projection.start();
+            this->chefsi_timer.projection_gemm.start();
         }
     #endif //ENABLE_CHEFSI_TIMER
 
@@ -1033,14 +1035,30 @@ void Chefsi<T>::project_hamiltonian(T* const& __restrict__ eigen_vectors, T* con
         const uint m = this->dp_domain_vertices.shared_vertices.get_nb();
         const uint k = this->dp_domain_vertices.local_vertices.Vertices_3D::get_size();
         if (this->domain_vertices.get_domain_4d_comm_size() == 1) {
+#if defined(XLSDFT_BACKEND_FREE)
+            Linalg::matrix_product(eigen_vectors, 0, h_eigen_vectors, 1, hp, 1, m, m, k);
+            Linalg::matrix_product(eigen_vectors, 0, eigen_vectors, 1, mp, 1, m, m, k);
+#else
             Linalg::set_kblas_nthread();
             Linalg::cblas__gemm<T>(CblasColMajor, CblasTrans, CblasNoTrans, m, m, k, T(1.0),
                                 eigen_vectors, k, h_eigen_vectors, k, T(0.0), hp, m);
-            // Linalg::cblas__gemm<T>(CblasColMajor, CblasTrans, CblasNoTrans, m, m, k, T(1.0),
-            //                     eigen_vectors, k, eigen_vectors, k, T(0.0), mp, m);
+            #ifdef ENABLE_CHEFSI_TIMER
+                #pragma omp master
+                {
+                    this->chefsi_timer.projection_gemm.stop();
+                    this->chefsi_timer.projection_syrk.start();
+                }
+            #endif //ENABLE_CHEFSI_TIMER
             Linalg::cblas__syrk(CblasColMajor, CblasUpper, CblasTrans, m, k, T(1.0),
                                      eigen_vectors, k, T(0.0), mp, m);
+            #ifdef ENABLE_CHEFSI_TIMER
+                #pragma omp master
+                {
+                    this->chefsi_timer.projection_syrk.stop();
+                }
+            #endif //ENABLE_CHEFSI_TIMER
             Linalg::set_kblas_1();
+#endif
             // Linalg::matrix_product(eigen_vectors, 0, h_eigen_vectors, 1,
             //                                 hp, 1, m, m, k);
             // Linalg::matrix_product(eigen_vectors, 0, eigen_vectors, 1,
@@ -1168,13 +1186,6 @@ void Chefsi<T>::project_hamiltonian(T* const& __restrict__ eigen_vectors, T* con
         std::cout << "The project_hamiltonian took " << Tools::time_cost(begin, end) << "." << std::endl;
     }
     }
-
-    #ifdef ENABLE_CHEFSI_TIMER
-        #pragma omp master
-        {
-            this->chefsi_timer.projection.stop();
-        }
-    #endif //ENABLE_CHEFSI_TIMER
 
     #else //USE_OPENMP
 
@@ -1323,7 +1334,9 @@ void Chefsi<T>::subspace_diagonalization(T* const& __restrict__ hp, T* const& __
             #ifdef USE_LAPACK
             int info = Linalg::LAPACKE__sygvd<T>(LAPACK_COL_MAJOR, 1, 'V', 'U', nstate,
                                                hp, nstate, mp, nstate, eigen_values);
-            assert(info == 0);
+            if (info != 0) {
+                assert(false);
+            }
             #else
             assert(!"LAPACKE__sygvd should be involved with LAPACKE loaded");
             (void) mp;
@@ -1399,7 +1412,9 @@ void Chefsi<T>::subspace_diagonalization(T* const& __restrict__ hp, T* const& __
                                 work, &lwork, iwork, &liwork, ifail, iclustr, gap, &info);
                 #pragma omp barrier
                 #pragma omp single nowait
-                assert(info == 0);
+                if (info != 0) {
+                assert(false);
+            }
                 #pragma omp single nowait
                 {
                     delete [] work;
@@ -1522,7 +1537,9 @@ void Chefsi<T>::subspace_diagonalization(T* const& __restrict__ hp, T* const& __
                             work, &lwork, iwork, &liwork, ifail, iclustr, gap, &info);
             // #pragma omp barrier
             #pragma omp single nowait
-            assert(info == 0);
+            if (info != 0) {
+                assert(false);
+            }
             #pragma omp single nowait
             {
                 delete [] work;
@@ -1609,7 +1626,9 @@ void Chefsi<T>::subspace_diagonalization(T* const& __restrict__ hp, T* const& __
             #ifdef USE_LAPACK
             int info = Linalg::LAPACKE__sygvd(LAPACK_COL_MAJOR, 1, 'V', 'U', nstate,
                                                hp, nstate, mp, nstate, eigen_values);
-            assert(info == 0);
+            if (info != 0) {
+                assert(false);
+            }
             #else
             assert(!"LAPACKE__sygvd should be involved with LAPACKE loaded");
             std::cout << "mp[0] = " << mp[0] << std::endl;
@@ -1665,7 +1684,9 @@ void Chefsi<T>::subspace_diagonalization(T* const& __restrict__ hp, T* const& __
                 delete [] iwork;
                 delete [] iclustr;
                 delete [] gap;
-                assert(info == 0);
+                if (info != 0) {
+                assert(false);
+            }
             }
 
             Linalg::p_gemr2d_(&nstates, &nstates, qp_2d_rashape, &one, &one, this->desc_2d_reshape_hp_mp,
@@ -1725,7 +1746,9 @@ void Chefsi<T>::subspace_diagonalization(T* const& __restrict__ hp, T* const& __
             delete [] iwork;
             delete [] iclustr;
             delete [] gap;
-            assert(info == 0);
+            if (info != 0) {
+                assert(false);
+            }
             Linalg::p_gemr2d_(&nstates, &nstates, qp_2d_rashape, &one, &one, this->desc_2d_reshape_hp_mp,
                               hp, &one, &one, this->desc_domain_3D_hp_mp, &(this->icontxt_2d_reshape));
         }
@@ -1780,11 +1803,14 @@ void Chefsi<T>::subspace_rotation(T*& __restrict__ eigen_vectors, T const* const
         uint n = this->dp_domain_vertices.local_vertices.get_nb();
         if (this->domain_vertices.get_domain_4d_comm_size() == 1) {
             if (m > 0) {
+#if defined(XLSDFT_BACKEND_FREE)
+                Linalg::matrix_product(eigen_vectors_reshape, 1, qp, 1, eigen_vectors, 1, m, n, n);
+#else
                 Linalg::set_kblas_nthread();
                 Linalg::cblas__gemm<T>(CblasColMajor, CblasNoTrans, CblasNoTrans, m, n, n, T(1.0),
                                 eigen_vectors_reshape, m, qp, n, T(0.0), eigen_vectors, m);
                 Linalg::set_kblas_1();
-                // Linalg::matrix_product(eigen_vectors_reshape, 1, qp, 1, eigen_vectors, 1, m, n, n);
+#endif
             }
             #pragma omp barrier
         } else {
@@ -2336,7 +2362,7 @@ inline void Chefsi<T>::cal_nonlocal_forces2(Array_2D<T>& nonlocal_forces, const 
         const Nloc_projector<T>& nloc_projector = effective_potential_nloc.nloc_projectors[i_nloc_projector];
         const uint ncol = nloc_projector.ncol;
         const uint nrow = nloc_projector.nrow;
-        uint const* const __restrict__ index = nloc_projector.index.data();
+        uint const* const __restrict__ index = nloc_projector.index_data();
         for (uint icol = 0; icol < ncol; icol++) {
             T const* const __restrict__ chi = nloc_projector.chi.data + icol * nrow;
             T* const chis_data_icol = chis.data + (effective_potential_nloc.offsets[i_nloc_projector] + icol) * nd;

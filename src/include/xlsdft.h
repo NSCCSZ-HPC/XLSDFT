@@ -2,6 +2,7 @@
 #define _XLSDFT_H_
 
 #include "eigen_solver.h"
+#include "laplacian_head_lottery.h"
 
 #if !defined(ENABLE_XLSDFT_TIMER) && defined(ENABLE_TIMER)
 #define ENABLE_XLSDFT_TIMER
@@ -344,6 +345,14 @@ public:
     #endif
     eigen_vectorses_lp; //eigen_vectorses low precision
     #endif
+    // Persistent packed ψ panels in pool_fast (opt path); see reserve_retained_packed_pool().
+    triple_head::Panels triple_panels_;
+    double* retained_packed_psi_ = nullptr;
+    double* wf_scratch_panel_ = nullptr;
+    double* packed_live_ = nullptr;
+    double* packed_alt_ = nullptr;
+    bool retained_pool_reserved_ = false;
+    bool retained_packed_initialized_ = false;
     Xlsdft(const Xlsdft_control& xlsdft_control,
            const Mesh_control& mesh_control,
            const Geometry& geometry,
@@ -416,6 +425,7 @@ public:
     void run_mp(T const* const ex_effective_potentail_loc, const Vertices_3D& ex_effective_potentail_vertices, const bool print_flag);
     void run_mp(T const* const ex_effective_potentail_loc, const Vertices_3D& ex_effective_potentail_vertices, const bool print_flag,
                 Memory_pool<T, Fast_memory>& pool_fast, Memory_pool<T, Capacity_memory>& pool_cap);
+    void reserve_retained_packed_pool(Memory_pool<T, Fast_memory>& pool_fast);
     void init(const std::vector<Psp8_file>& psp8_files);
     template<typename T2> void init(const Xlsdft<T2>& xlsdft);
     void destructor();

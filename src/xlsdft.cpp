@@ -1,5 +1,15 @@
 #include "xlsdft.h"
+#include "chefsi_layout.h"
+#include "nloc_fixture_dump.hpp"
+#include "xlsdft_nchi_diag.hpp"
+#include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <iostream>
+#include <type_traits>
+#include <set>
+#include <tuple>
 
 #ifdef ENABLE_XLSDFT_TIMER
 #pragma message("Building with ENABLE_XLSDFT_TIMER.")
@@ -1494,7 +1504,9 @@ template<typename T>
 void Xlsdft<T>::print_eigens(const T& chemical_potential, const Smearing& smearing,
                                    const Spin& spin, const std::string& fname) const {
     const uint nspin = spin.generate_nspin();
-    assert(nspin == 1);
+    if (nspin != 1) {
+        assert(false);
+    }
     uint nstates = 0;
     for (uint ielement = 0; ielement < this->local_element_num; ielement++) {
         if (this->domain_verticeses[ielement].shared_vertices.get_size() == 0) continue;
@@ -1575,7 +1587,9 @@ template<typename T>
 void Xlsdft<T>::print_eigens_divided(const T& chemical_potential, const Smearing& smearing,
                                    const Spin& spin, const std::string& dir_name) const {
     const uint nspin = spin.generate_nspin();
-    assert(nspin == 1);
+    if (nspin != 1) {
+        assert(false);
+    }
     const uint comm_i = this->domain_vertices.get_active_comm_i();
     const uint comm_j = this->domain_vertices.get_active_comm_j();
     const uint comm_k = this->domain_vertices.get_active_comm_k();
@@ -1761,7 +1775,7 @@ void Xlsdft<T>::print_timer_statistics(const bool if_print, std::ostream& output
                 this->eigen_solvers[ielement].chefsi.chefsi_timer.H_psi.time_cost_millisecond();
 
             t_locals[count++] +=
-                this->eigen_solvers[ielement].chefsi.chefsi_timer.projection.time_cost_millisecond();
+                this->eigen_solvers[ielement].chefsi.chefsi_timer.projection_time_cost_millisecond();
 
             t_locals[count++] +=
                 this->eigen_solvers[ielement].chefsi.chefsi_timer.diagonalization.time_cost_millisecond();
@@ -2056,8 +2070,8 @@ void Xlsdft<T>::run(const Array_3D<T>& ex_effective_potentail_loc, const bool& p
 template<typename T>
 void Xlsdft<T>::run_mp(T const* const ex_effective_potentail_loc, const Vertices_3D& ex_effective_potentail_vertices, const bool print_flag) {
     constexpr size_t GB = 1024 * 1024 * 1024 / sizeof(T);
-    Memory_pool<T, Fast_memory> pool_fast(3.5 * GB);
-    Memory_pool<T, Capacity_memory> pool_cap(3.5 * GB);
+    Memory_pool<T, Fast_memory> pool_fast(3.75 * GB);
+    Memory_pool<T, Capacity_memory> pool_cap(3.75 * GB);
     this->run_mp(ex_effective_potentail_loc, ex_effective_potentail_vertices, print_flag,
                     pool_fast, pool_cap);
     // #ifdef ENABLE_XLSDFT_TIMER
@@ -2176,6 +2190,47 @@ void Xlsdft<T>::run_mp(T const* const ex_effective_potentail_loc, const Vertices
 }
 
 template<typename T>
+void Xlsdft<T>::reserve_retained_packed_pool(Memory_pool<T, Fast_memory>& pool_fast) {
+    if constexpr (std::is_same_v<T, double>) {
+        if (this->retained_pool_reserved_ || this->local_element_num == 0) return;
+        size_t max_wf_elems = 0;
+        uint representative = 0;
+        std::set<std::tuple<size_t, size_t, size_t, size_t>> shapes;
+        for (uint e = 0; e < this->local_element_num; ++e) {
+            const auto& v = this->eigen_solvers[e].domain_vertices.get_3D_local_vertices();
+            const size_t nb = this->eigen_solvers[e].domain_vertices.get_4D_local_vertices().nb;
+            shapes.emplace(v.ni, v.nj, v.nk, nb);
+            const size_t n = chefsi_layout::wf_stride(v.get_size(), nb);
+            if (n > max_wf_elems) { max_wf_elems = n; representative = e; }
+        }
+        const char* mode = std::getenv("XLSDFT_TRIPLE_LOTTERY");
+        assert(mode == nullptr || std::strcmp(mode, "0") == 0 ||
+               std::strcmp(mode, "1") == 0 || std::strcmp(mode, "fixed") == 0);
+        const bool enable = mode == nullptr || std::strcmp(mode, "0") != 0;
+        if (enable) {
+            this->triple_panels_.allocate(pool_fast, max_wf_elems);
+            pool_fast.set_persistent_floor(pool_fast.mark());
+            const auto& solver = this->eigen_solvers[representative];
+            triple_head::tune(this->triple_panels_, solver.domain_vertices.get_3D_local_vertices(),
+                              solver.domain_vertices.get_4D_local_vertices().nb, solver.stencil,
+                              pool_fast, this->domain_vertices.get_comm_rank(),
+                              mode == nullptr || std::strcmp(mode, "fixed") != 0, shapes.size());
+            this->retained_packed_psi_ = this->triple_panels_.head[0];
+            this->wf_scratch_panel_ = this->triple_panels_.head[1];
+        } else {
+            this->retained_packed_psi_ = pool_fast.allocate(max_wf_elems);
+            this->wf_scratch_panel_ = pool_fast.allocate(max_wf_elems);
+            pool_fast.set_persistent_floor(pool_fast.mark());
+        }
+        this->packed_live_ = this->retained_packed_psi_;
+        this->packed_alt_ = this->wf_scratch_panel_;
+        this->retained_pool_reserved_ = true;
+        assert(pool_fast.mark() >= pool_fast.persistent_floor());
+        assert(pool_fast.persistent_floor() > 0);
+    }
+}
+
+template<typename T>
 void Xlsdft<T>::run_mp(T const* const ex_effective_potentail_loc,
                       const Vertices_3D& ex_effective_potentail_vertices,
                       const bool print_flag,
@@ -2195,6 +2250,13 @@ void Xlsdft<T>::run_mp(T const* const ex_effective_potentail_loc,
         this->xlsdft_timer.xlsdft.start();
     #endif //ENABLE_XLSDFT_TIMER
     bool print_flag_local = this->domain_vertices.get_active_comm_b() == 0 ? true : false;
+    const bool nchi_diag = xlsdft_nchi_diag_enabled();
+    size_t rank_nchi_sum = 0;
+    size_t rank_projector_bytes_sum = 0;
+    size_t rank_projector_bytes_max = 0;
+    double rank_chi_build_ms_sum = 0.0;
+    double rank_filter_nloc_ms_sum = 0.0;
+    double rank_chefsi_ms_sum = 0.0;
     for (uint ielement = 0; ielement < this->local_element_num; ielement++) {
         Memory_pool_scope<Memory_pool<T, Fast_memory>> scope_fast2(pool_fast);
         Memory_pool_scope<Memory_pool<T, Capacity_memory>> scope_cap2(pool_cap);
@@ -2202,6 +2264,159 @@ void Xlsdft<T>::run_mp(T const* const ex_effective_potentail_loc,
             std::cout << "The index " << ielement << " element of its element comm start the eigen_solver." << std::endl;
         }
         
+        const Vertices_3D& local_vertices_3d = this->eigen_solvers[ielement].domain_vertices.get_3D_local_vertices();
+        const uint K = local_vertices_3d.get_size();
+        const uint nb = this->eigen_solvers[ielement].domain_vertices.get_4D_local_vertices().nb;
+        bool run_legacy_path = true;
+        if constexpr (std::is_same_v<T, double>) {
+            if (std::getenv("CHEFSI_USE_OPT") != nullptr) {
+            run_legacy_path = false;
+            assert(this->retained_pool_reserved_);
+            assert(pool_fast.persistent_floor() > 0);
+            assert(pool_fast.mark() >= pool_fast.persistent_floor());
+
+            #if (defined(LOW_MEMORY))
+            const Vertices_4D vertices_eigen_vectors = this->eigen_vectorses_lp[ielement].get_vertices();
+            #else
+            const Vertices_4D vertices_eigen_vectors = this->domain_verticeses[ielement].get_4D_local_vertices();
+            #endif
+            const uint eigen_vector_length = vertices_eigen_vectors.get_size();
+            const uint nat_elems = K * nb;
+            assert(nat_elems <= eigen_vector_length);
+
+            double* packed_in = this->packed_live_;
+            double* packed_out = this->packed_alt_;
+            // Reuse packed_alt_ as natural scratch: tile input (LOW_MEMORY) and untile
+            // output after swap (wf_stride >= K*nb).
+
+            const bool use_retained_direct =
+                this->retained_packed_initialized_ && ielement == 0 &&
+                this->local_element_num == 1;
+            if (!use_retained_direct) {
+                #if (defined(LOW_MEMORY))
+                #ifdef ENABLE_XLSDFT_TIMER
+                    this->xlsdft_timer.xlsdft_low_memory_psi.start();
+                #endif //ENABLE_XLSDFT_TIMER
+                #pragma omp parallel
+                Linalg::convert_type(packed_out,
+                                     this->eigen_vectorses_lp[ielement].data, nat_elems);
+                #ifdef ENABLE_XLSDFT_TIMER
+                    this->xlsdft_timer.xlsdft_low_memory_psi.stop();
+                #endif //ENABLE_XLSDFT_TIMER
+                chefsi_layout::tile_16(nb, K, packed_in, packed_out);
+                #else
+                chefsi_layout::tile_16(nb, K, packed_in,
+                                       this->eigen_solvers[ielement].eigen_vectors.data);
+                #endif
+                this->retained_packed_initialized_ = true;
+            }
+
+            #ifdef ENABLE_XLSDFT_TIMER
+                this->xlsdft_timer.xlsdft_copy_veff.start();
+            #endif //ENABLE_XLSDFT_TIMER
+            const uint effective_potentail_loc_length = K;
+            double* effective_potentail_loc =
+                reinterpret_cast<double*>(pool_fast.allocate(effective_potentail_loc_length));
+            Vertices_method::fill_region(ex_effective_potentail_loc, ex_effective_potentail_vertices,
+                                         effective_potentail_loc, local_vertices_3d, local_vertices_3d);
+            double vloc_sum = Linalg::vector_sum(effective_potentail_loc, effective_potentail_loc_length,
+                                                 MPI_COMM_NULL);
+            this->U0s[ielement] = T(vloc_sum / double(effective_potentail_loc_length));
+            #ifdef ENABLE_XLSDFT_TIMER
+                this->xlsdft_timer.xlsdft_copy_veff.stop();
+            #endif //ENABLE_XLSDFT_TIMER
+
+            #ifdef ENABLE_XLSDFT_TIMER
+                this->xlsdft_timer.xlsdft_eigen_solver.start();
+            #endif //ENABLE_XLSDFT_TIMER
+            nloc_fixture_dump::current_element() = static_cast<int>(ielement);
+            if (this->triple_panels_.enabled) {
+                auto& panels = this->triple_panels_;
+                panels.check_guards();
+                this->eigen_solvers[ielement].chefsi.opt_third_panel = panels.unused(packed_in, packed_out);
+                this->eigen_solvers[ielement].chefsi.opt_third_panel_elems = panels.elems;
+                if (!panels.usage_reported) {
+                    if (triple_head::verbose_enabled()) {
+                        std::fprintf(stderr, "TRIPLE_BUFFER_USE rank=%d input=%d output=%d third=%d offsets=%zu,%zu,%zu distinct=1\n",
+                                     this->domain_vertices.get_comm_rank(), panels.index(packed_in), panels.index(packed_out),
+                                     panels.index(this->eigen_solvers[ielement].chefsi.opt_third_panel),
+                                     panels.offset[0], panels.offset[1], panels.offset[2]);
+                    }
+                    panels.usage_reported = true;
+                }
+            }
+            this->eigen_solvers[ielement].run_mp_opt(packed_in, packed_out,
+                                                     effective_potentail_loc,
+                                                     print_flag && print_flag_local,
+                                                     pool_fast, pool_cap);
+            if (nchi_diag) {
+                const Xlsdft_element_workload_diag& diag =
+                    this->eigen_solvers[ielement].element_workload_diag;
+                if (diag.valid) {
+                    rank_nchi_sum += diag.nchi;
+                    rank_projector_bytes_sum += diag.projector_bytes;
+                    if (diag.projector_bytes > rank_projector_bytes_max) {
+                        rank_projector_bytes_max = diag.projector_bytes;
+                    }
+                    rank_chi_build_ms_sum += diag.chi_build_ms;
+                    rank_filter_nloc_ms_sum += diag.filter_nloc_ms;
+                    rank_chefsi_ms_sum += diag.chefsi_ms;
+                    const int rank = this->domain_vertices.get_comm_rank();
+                    std::fprintf(stderr,
+                                 "NCHI rank=%d elem=%u nchi=%zu nproj=%zu bytes=%zu "
+                                 "chi_ms=%.3f filter_nloc_ms=%.3f chefsi_ms=%.3f eigen_ms=%.3f\n",
+                                 rank, ielement, diag.nchi, diag.n_projectors,
+                                 diag.projector_bytes, diag.chi_build_ms,
+                                 diag.filter_nloc_ms, diag.chefsi_ms, diag.eigen_ms);
+                }
+            }
+            #ifdef ENABLE_XLSDFT_TIMER
+                this->xlsdft_timer.xlsdft_eigen_solver.stop();
+            #endif //ENABLE_XLSDFT_TIMER
+
+            // CheFSI returns packed_in -> SR tile_16 output (psi_buf after filter
+            // swaps). packed_out may point at freed pool scratch (psi); use the
+            // retained panel that is not the tile_16 output for natural untile.
+            this->packed_live_ = packed_in;
+            if (this->triple_panels_.enabled) {
+                this->triple_panels_.check_guards();
+                this->packed_alt_ = this->triple_panels_.alternate(packed_in);
+            } else {
+                this->packed_alt_ =
+                    (packed_in == this->retained_packed_psi_) ? this->wf_scratch_panel_
+                                                             : this->retained_packed_psi_;
+            }
+            double* const tile16_out = this->packed_live_;
+            double* const natural_scratch = this->packed_alt_;
+
+            #if (defined(LOW_MEMORY))
+            #ifdef ENABLE_XLSDFT_TIMER
+                this->xlsdft_timer.xlsdft_low_memory_psi.start();
+            #endif //ENABLE_XLSDFT_TIMER
+            const Vertices_4D& eigen_region = this->eigen_solvers[ielement].domain_vertices.local_vertices;
+            const Vertices_3D& element_vertices = this->element_verticeses[ielement];
+            Vertices_4D region(element_vertices.get_overlap_vertices(eigen_region),
+                               eigen_region.bs, eigen_region.get_be());
+            chefsi_layout::untile_16_production(nb, K, natural_scratch, tile16_out);
+            #pragma omp parallel
+            Vertices_method::fill_region(natural_scratch, vertices_eigen_vectors,
+                                         this->eigen_solvers[ielement].eigen_vectors.data,
+                                         region, region);
+            #pragma omp parallel
+            Linalg::convert_type(this->eigen_vectorses_lp[ielement].data, natural_scratch,
+                                 eigen_vector_length);
+            #ifdef ENABLE_XLSDFT_TIMER
+                this->xlsdft_timer.xlsdft_low_memory_psi.stop();
+            #endif //ENABLE_XLSDFT_TIMER
+            #else
+            chefsi_layout::untile_16_production(nb, K, natural_scratch, tile16_out);
+            #pragma omp parallel
+            Linalg::set_value_general(this->eigen_solvers[ielement].eigen_vectors.data,
+                                      natural_scratch, nat_elems);
+            #endif
+            }
+        }
+        if (run_legacy_path) {
         // copy data from eigenvector
         #if (defined(LOW_MEMORY))
             #ifdef ENABLE_XLSDFT_TIMER
@@ -2213,10 +2428,6 @@ void Xlsdft<T>::run_mp(T const* const ex_effective_potentail_loc,
             T* eigen_vectors_out = pool_fast.allocate(eigen_vector_length);
             #pragma omp parallel
             Linalg::convert_type(eigen_vectors_in, this->eigen_vectorses_lp[ielement].data, eigen_vector_length);
-            // this->eigen_solvers[ielement].eigen_vectors.deepcopy(std::move(eigen_vectors_rv));
-            // this->eigen_solvers[ielement].eigen_vectors.deepcopy(
-            //         std::move(this->eigen_vectorses_lp[ielement].as_type(this->eigen_solvers[ielement].eigen_vectors.data)));
-            // this->eigen_vectorses_lp[ielement].destructor();
             #ifdef ENABLE_XLSDFT_TIMER
                 this->xlsdft_timer.xlsdft_low_memory_psi.stop();
             #endif //ENABLE_XLSDFT_TIMER
@@ -2236,11 +2447,8 @@ void Xlsdft<T>::run_mp(T const* const ex_effective_potentail_loc,
         #ifdef ENABLE_XLSDFT_TIMER
             this->xlsdft_timer.xlsdft_copy_veff.start();
         #endif //ENABLE_XLSDFT_TIMER
-        const Vertices_3D& local_vertices_3d = this->eigen_solvers[ielement].domain_vertices.get_3D_local_vertices();
         const uint effective_potentail_loc_length = local_vertices_3d.get_size();
-        // Array_3D<T> effective_potentail_loc(local_vertices_3d);
         T* effective_potentail_loc = pool_fast.allocate(effective_potentail_loc_length);
-        // ex_effective_potentail_loc.fill_overlap(effective_potentail_loc);
         Vertices_method::fill_region(ex_effective_potentail_loc, ex_effective_potentail_vertices,
                                  effective_potentail_loc, local_vertices_3d, local_vertices_3d);
         T vloc_sum = Linalg::vector_sum(effective_potentail_loc, effective_potentail_loc_length, MPI_COMM_NULL);
@@ -2249,13 +2457,18 @@ void Xlsdft<T>::run_mp(T const* const ex_effective_potentail_loc,
             this->xlsdft_timer.xlsdft_copy_veff.stop();
         #endif //ENABLE_XLSDFT_TIMER
 
-        //run eigen_solver
-        this->eigen_solvers[ielement].run_mp(eigen_vectors_in, eigen_vectors_out, effective_potentail_loc,
-                                            print_flag && print_flag_local, pool_fast, pool_cap);
+            this->eigen_solvers[ielement].run_mp(eigen_vectors_in, eigen_vectors_out,
+                                                 effective_potentail_loc,
+                                                 print_flag && print_flag_local, pool_fast,
+                                                 pool_cap);
         #ifdef ENABLE_XLSDFT_TIMER
             this->xlsdft_timer.xlsdft_eigen_solver.stop();
         #endif //ENABLE_XLSDFT_TIMER
-        // store data to fp16
+        #if !(defined(LOW_MEMORY))
+            #pragma omp parallel
+            Linalg::set_value_general(this->eigen_solvers[ielement].eigen_vectors.data,
+                                      eigen_vectors_out, eigen_vector_length);
+        #endif
         #if (defined(LOW_MEMORY))
             #ifdef ENABLE_XLSDFT_TIMER
                 this->xlsdft_timer.xlsdft_low_memory_psi.start();
@@ -2273,6 +2486,54 @@ void Xlsdft<T>::run_mp(T const* const ex_effective_potentail_loc,
                 this->xlsdft_timer.xlsdft_low_memory_psi.stop();
             #endif //ENABLE_XLSDFT_TIMER
         #endif
+        }  // run_legacy_path
+    }
+    if (nchi_diag) {
+        const int rank = this->domain_vertices.get_comm_rank();
+        MPI_Comm comm = this->domain_vertices.get_mpi_comm();
+        std::fprintf(stderr,
+                     "NCHI_TOTAL rank=%d elements=%u nchi=%zu bytes_sum=%zu bytes_max=%zu "
+                     "chi_ms=%.3f filter_nloc_ms=%.3f chefsi_ms=%.3f\n",
+                     rank, this->local_element_num, rank_nchi_sum,
+                     rank_projector_bytes_sum, rank_projector_bytes_max,
+                     rank_chi_build_ms_sum, rank_filter_nloc_ms_sum, rank_chefsi_ms_sum);
+
+        const unsigned long long local_nchi = rank_nchi_sum;
+        unsigned long long max_nchi = 0;
+        unsigned long long min_nchi = 0;
+        MPI_Allreduce(&local_nchi, &max_nchi, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
+        MPI_Allreduce(&local_nchi, &min_nchi, 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, comm);
+
+        const double local_filter_nloc_ms = rank_filter_nloc_ms_sum;
+        double max_filter_nloc_ms = 0.0;
+        double min_filter_nloc_ms = 0.0;
+        MPI_Allreduce(&local_filter_nloc_ms, &max_filter_nloc_ms, 1, MPI_DOUBLE, MPI_MAX, comm);
+        MPI_Allreduce(&local_filter_nloc_ms, &min_filter_nloc_ms, 1, MPI_DOUBLE, MPI_MIN, comm);
+
+        if (rank == 0) {
+            const double nchi_spread_pct =
+                min_nchi > 0
+                    ? 100.0 * (static_cast<double>(max_nchi) / static_cast<double>(min_nchi) - 1.0)
+                    : 0.0;
+            const double filter_nloc_spread_pct =
+                min_filter_nloc_ms > 0.0
+                    ? 100.0 * (max_filter_nloc_ms / min_filter_nloc_ms - 1.0)
+                    : 0.0;
+            std::fprintf(stderr,
+                         "NCHI_CROSS_RANK nchi_min=%llu nchi_max=%llu spread=%.1f%% "
+                         "filter_nloc_ms_min=%.1f filter_nloc_ms_max=%.1f spread=%.1f%%\n",
+                         min_nchi, max_nchi, nchi_spread_pct,
+                         min_filter_nloc_ms, max_filter_nloc_ms, filter_nloc_spread_pct);
+        }
+
+        unsigned long long max_bytes_sum = 0;
+        const unsigned long long local_bytes_sum = rank_projector_bytes_sum;
+        MPI_Allreduce(&local_bytes_sum, &max_bytes_sum, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
+        if (rank == 0) {
+            std::fprintf(stderr,
+                         "NCHI_CACHE_EST max_rank_bytes_sum=%llu (per-rank if all elements cached)\n",
+                         max_bytes_sum);
+        }
     }
     #ifdef ENABLE_XLSDFT_TIMER
         this->xlsdft_timer.xlsdft_barrier2.start();

@@ -451,7 +451,7 @@ void nloc_project_vectors(T* const& __restrict__ result, T const* const& __restr
             Linalg::matrix_vector_product(effective_potential_nloc.nloc_projectors[iprojector].chi.data, 1,
                                           chi_vector + effective_potential_nloc.offsets[iprojector], temp, nrow, ncol);
             #pragma omp barrier
-            uint const* __restrict__ index_data = effective_potential_nloc.nloc_projectors[iprojector].index.data();
+            uint const* __restrict__ index_data = effective_potential_nloc.nloc_projectors[iprojector].index_data();
             #ifdef USE_OPENMP_SIMD
             #pragma omp for simd schedule(static, (nrow - 1)/omp_get_num_threads() + 1) nowait
             #else
@@ -703,7 +703,7 @@ inline void nloc_project_vectors_omp_domain(T* const& __restrict__ result, const
             Linalg::matrix_product(effective_potential_nloc.nloc_projectors[iprojector].chi.data, 1, chi_vector_local, 1, temp, 1, nrow, nb, ncol);
             #pragma omp barrier
             const uint vertices_3d_size = vertices.Vertices_3D::get_size();
-            uint const* __restrict__ index_data = effective_potential_nloc.nloc_projectors[iprojector].index.data();
+            uint const* __restrict__ index_data = effective_potential_nloc.nloc_projectors[iprojector].index_data();
             #pragma omp barrier
             #ifdef USE_OPENMP_SIMD
             #pragma omp for simd schedule(static, (nb * nrow - 1)/omp_get_num_threads() + 1) collapse(2) nowait
@@ -811,7 +811,7 @@ inline void nloc_project_vectors_omp_for(T* const& __restrict__ result, const Ve
             {
                 T* const __restrict__ temp = new T [nrow * nb]();
                 Linalg::matrix_product(effective_potential_nloc.nloc_projectors[iprojector].chi.data, 1, chi_vector_local, 1, temp, 1, nrow, nb, ncol);
-                uint const* __restrict__ index_data = effective_potential_nloc.nloc_projectors[iprojector].index.data();
+                uint const* __restrict__ index_data = effective_potential_nloc.nloc_projectors[iprojector].index_data();
                 #pragma omp critical
                 for (uint ib = 0; ib < nb; ib++) {
                     #pragma omp simd
@@ -897,12 +897,10 @@ inline void nloc_project_vectors_omp_for_comm_self_with_chunk(T* const& __restri
                 T* const __restrict__ chi_vector_local = chi_vector + effective_potential_nloc.offsets[iprojector] * nb_local;
                 T* const __restrict__ temp = new (std::align_val_t(64)) T [nrow * nb_local]();
                 #pragma omp parallel if(0)
-                Linalg::cblas__gemm(CblasColMajor, CblasNoTrans, CblasNoTrans,
-                                    nrow, nb_local, ncol,
-                                    T(1.0), effective_potential_nloc.nloc_projectors[iprojector].chi.data, nrow,
-                                    chi_vector_local, ncol,
-                                    T(0.0), temp, nrow);
-                uint const* __restrict__ index_data = effective_potential_nloc.nloc_projectors[iprojector].index.data();
+                Linalg::matrix_product(
+                    effective_potential_nloc.nloc_projectors[iprojector].chi.data,
+                    1, chi_vector_local, 1, temp, 1, nrow, nb_local, ncol);
+                uint const* __restrict__ index_data = effective_potential_nloc.nloc_projectors[iprojector].index_data();
                 for (uint ib_local = 0; ib_local < nb_local; ib_local++) {
                     #pragma omp simd
                     for (uint i = 0; i < nrow; i++) {
@@ -985,7 +983,7 @@ inline void nloc_project_vectors_omp_task(T* const& __restrict__ result, const V
                 {
                     T* const __restrict__ temp = new T [nrow * nb]();
                     Linalg::matrix_product(effective_potential_nloc.nloc_projectors[iprojector].chi.data, 1, chi_vector_local, 1, temp, 1, nrow, nb, ncol);
-                    uint const* __restrict__ index_data = effective_potential_nloc.nloc_projectors[iprojector].index.data();
+                    uint const* __restrict__ index_data = effective_potential_nloc.nloc_projectors[iprojector].index_data();
                     #pragma omp critical
                     for (uint ib = 0; ib < nb; ib++) {
                         #pragma omp simd
@@ -1122,12 +1120,10 @@ void nloc_project_vectors_omp_for_comm_self_with_chunk_mp(T* const __restrict__ 
                 #pragma omp parallel if(0)
                 Linalg::set_value_general(temp, T(0), nrow * nb_local);
                 #pragma omp parallel if(0)
-                Linalg::cblas__gemm(CblasColMajor, CblasNoTrans, CblasNoTrans,
-                                    nrow, nb_local, ncol,
-                                    T(1.0), effective_potential_nloc.nloc_projectors[iprojector].chi.data, nrow,
-                                    chi_vector_local, ncol,
-                                    T(0.0), temp, nrow);
-                uint const* __restrict__ index_data = effective_potential_nloc.nloc_projectors[iprojector].index.data();
+                Linalg::matrix_product(
+                    effective_potential_nloc.nloc_projectors[iprojector].chi.data,
+                    1, chi_vector_local, 1, temp, 1, nrow, nb_local, ncol);
+                uint const* __restrict__ index_data = effective_potential_nloc.nloc_projectors[iprojector].index_data();
                 for (uint ib_local = 0; ib_local < nb_local; ib_local++) {
                     #pragma omp simd
                     for (uint i = 0; i < nrow; i++) {
@@ -1309,12 +1305,10 @@ void hamiltonian_product_vectors_column_wise2_compute_fusion_mp(
                 #pragma omp parallel if(0)
                 Linalg::set_value_general(temp, T(0), nrow * nb_local);
                 #pragma omp parallel if(0)
-                Linalg::cblas__gemm(CblasColMajor, CblasNoTrans, CblasNoTrans,
-                                    nrow, nb_local, ncol,
-                                    T(1.0), effective_potential_nloc.nloc_projectors[iprojector].chi.data, nrow,
-                                    chi_vector_local, ncol,
-                                    T(0.0), temp, nrow);
-                uint const* __restrict__ index_data = effective_potential_nloc.nloc_projectors[iprojector].index.data();
+                Linalg::matrix_product(
+                    effective_potential_nloc.nloc_projectors[iprojector].chi.data,
+                    1, chi_vector_local, 1, temp, 1, nrow, nb_local, ncol);
+                uint const* __restrict__ index_data = effective_potential_nloc.nloc_projectors[iprojector].index_data();
                 for (uint ib_local = 0; ib_local < nb_local; ib_local++) {
                     #pragma omp simd
                     for (uint i = 0; i < nrow; i++) {

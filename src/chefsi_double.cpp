@@ -1,11 +1,26 @@
 #include "chefsi.h"
+#include "xlsdft_chefsi_lvtx.hpp"
+#include "xlsdft_backend.h"
 #pragma message("Building with chefsi_double.cpp.")
 
+#include <type_traits>
+#include <unistd.h>
+
+#ifndef stencil_nthread
 #define stencil_nthread 36
+#endif
+#ifndef nloc_nthread
 #define nloc_nthread 36
+#endif
+#ifndef projection_nthread
 #define projection_nthread 24
+#endif
+#ifndef dia_nthread
 #define dia_nthread 24
+#endif
+#ifndef rotation_nthread
 #define rotation_nthread 24
+#endif
 
 // #ifdef ENABLE_CHEFSI_TIMER
 // #pragma message("Building with ENABLE_CHEFSI_DOUBLE_TIMER.")
@@ -203,7 +218,7 @@ void Chefsi<T>::project_hamiltonian_with_temp_swap(T*& eigen_vectors, T*& h_eige
     #ifdef ENABLE_CHEFSI_TIMER
         #pragma omp master
         {
-            this->chefsi_timer.projection.start();
+            this->chefsi_timer.projection_gemm.start();
         }
     #endif //ENABLE_CHEFSI_TIMER
 
@@ -213,13 +228,22 @@ void Chefsi<T>::project_hamiltonian_with_temp_swap(T*& eigen_vectors, T*& h_eige
         const uint m = this->dp_domain_vertices.shared_vertices.get_nb();
         const uint k = this->dp_domain_vertices.local_vertices.Vertices_3D::get_size();
         if (this->domain_vertices.get_domain_4d_comm_size() == 1) {
-            // Linalg::set_kblas_nthread();
-            Linalg::cblas__gemm<T>(CblasColMajor, CblasTrans, CblasNoTrans, m, m, k, T(1.0),
-                                eigen_vectors, k, h_eigen_vectors, k, T(0.0), hp, m);
-            // Linalg::cblas__gemm<T>(CblasColMajor, CblasTrans, CblasNoTrans, m, m, k, T(1.0),
-            //                     eigen_vectors, k, eigen_vectors, k, T(0.0), mp, m);
-            Linalg::cblas__syrk(CblasColMajor, CblasUpper, CblasTrans, m, k, T(1.0),
-                                     eigen_vectors, k, T(0.0), mp, m);
+            if (Xlsdft_chefsi_lvtx::projection_contract_matches<T>(m, k)) {
+                const std::size_t workspace_doubles =
+                    Xlsdft_backend::projection_workspace_doubles();
+                double* workspace =
+                    new (std::align_val_t(64)) double[workspace_doubles];
+                const int status = Xlsdft_chefsi_lvtx::project_hamiltonian(
+                    eigen_vectors, h_eigen_vectors, hp, mp, workspace,
+                    workspace_doubles);
+                Xlsdft_backend::require_success(
+                    Xlsdft_backend::Operation::dgemm_poj, status,
+                    this->domain_vertices.comm);
+                ::operator delete[](workspace, std::align_val_t(64));
+            } else {
+                Xlsdft_chefsi_lvtx::project_hamiltonian_fallback(
+                    m, k, eigen_vectors, h_eigen_vectors, hp, mp);
+            }
             // Linalg::set_kblas_1();
             // Linalg::matrix_product(eigen_vectors, 0, h_eigen_vectors, 1,
             //                                 hp, 1, m, m, k);
@@ -249,12 +273,6 @@ void Chefsi<T>::project_hamiltonian_with_temp_swap(T*& eigen_vectors, T*& h_eige
     }
     }
 
-    #ifdef ENABLE_CHEFSI_TIMER
-        #pragma omp master
-        {
-            this->chefsi_timer.projection.stop();
-        }
-    #endif //ENABLE_CHEFSI_TIMER
     return;
 }
 
@@ -277,11 +295,22 @@ void Chefsi<T>::subspace_rotation_specialization(T*& __restrict__ eigen_vectors,
         uint n = this->dp_domain_vertices.local_vertices.get_nb();
         if (this->domain_vertices.get_domain_4d_comm_size() == 1) {
             if (m > 0) {
-                // Linalg::set_kblas_nthread();
-                Linalg::cblas__gemm<T>(CblasColMajor, CblasNoTrans, CblasNoTrans, m, n, n, T(1.0),
-                                eigen_vectors_reshape, m, qp, n, T(0.0), eigen_vectors, m);
-                // Linalg::set_kblas_1();
-                // Linalg::matrix_product(eigen_vectors_reshape, 1, qp, 1, eigen_vectors, 1, m, n, n);
+                if (Xlsdft_chefsi_lvtx::rotation_contract_matches<T>(m, n)) {
+                    const std::size_t workspace_doubles =
+                        Xlsdft_backend::rotation_workspace_doubles();
+                    double* workspace =
+                        new (std::align_val_t(64)) double[workspace_doubles];
+                    const int status = Xlsdft_chefsi_lvtx::rotate_subspace(
+                        eigen_vectors_reshape, qp, eigen_vectors, workspace,
+                        workspace_doubles);
+                    Xlsdft_backend::require_success(
+                        Xlsdft_backend::Operation::dgemm_rotation, status,
+                        this->domain_vertices.comm);
+                    ::operator delete[](workspace, std::align_val_t(64));
+                } else {
+                    Xlsdft_chefsi_lvtx::rotate_subspace_fallback(
+                        m, n, eigen_vectors_reshape, qp, eigen_vectors);
+                }
             }
             #pragma omp barrier
         } else {
@@ -604,6 +633,12 @@ void Chefsi<T>::run_mp(T*& eigen_vectors_in, T*& eigen_vectors_out, T *const eig
                   << "])."<< std::endl;
     }
 
+    const uint wf_elems = local_vertices_4d.get_size();
+    T* eigen_vectors_m1 = nullptr;
+    if (this->chefsi_control.chebyshev_filter_degree > 1) {
+        eigen_vectors_m1 = pool_cap.allocate(wf_elems);
+    }
+
     for (uint iter = 0; iter < niter; iter++) {
         Memory_pool_scope<Memory_pool<T, Fast_memory>> scope_fast2(pool_fast);
         Memory_pool_scope<Memory_pool<T, Capacity_memory>> scope_cap2(pool_cap);
@@ -621,7 +656,13 @@ void Chefsi<T>::run_mp(T*& eigen_vectors_in, T*& eigen_vectors_out, T *const eig
             this->chefsi_timer.lanczos.stop();
         #endif //ENABLE_CHEFSI_TIMER
         // #pragma omp parallel
-        this->chebyshev_filtering_column_wise_mp(eigen_vectors_in, eigen_vectors_out, Vloc, Vnloc, print_flag, pool_fast, pool_cap);
+        this->chebyshev_filtering_column_wise_mp(eigen_vectors_in, eigen_vectors_out, eigen_vectors_m1,
+                                                  Vloc, Vnloc, print_flag, pool_fast, pool_cap);
+        // Degree>=2 filter can leave in/out aliased; H must not overwrite psi.
+        if (eigen_vectors_in == eigen_vectors_out) {
+            assert(eigen_vectors_m1 != nullptr);
+            std::swap(eigen_vectors_out, eigen_vectors_m1);
+        }
         #ifdef ENABLE_CHEFSI_TIMER
             this->chefsi_timer.H_psi.start();
         #endif //ENABLE_CHEFSI_TIMER
@@ -633,8 +674,8 @@ void Chefsi<T>::run_mp(T*& eigen_vectors_in, T*& eigen_vectors_out, T *const eig
         #ifdef ENABLE_CHEFSI_TIMER
             this->chefsi_timer.H_psi.stop();
         #endif //ENABLE_CHEFSI_TIMER
-        T* hp = pool_fast.allocate(nstates_shared * nstates_shared);
-        T* mp = pool_fast.allocate(nstates_shared * nstates_shared);
+        T* hp = pool_cap.allocate(nstates_shared * nstates_shared);
+        T* mp = pool_cap.allocate(nstates_shared * nstates_shared);
         #ifdef USE_KML
         BlasSetNumThreadsLocal(projection_nthread);
         #endif
@@ -642,7 +683,8 @@ void Chefsi<T>::run_mp(T*& eigen_vectors_in, T*& eigen_vectors_out, T *const eig
         #ifdef USE_KML
         BlasSetNumThreadsLocal(dia_nthread);
         #endif
-        this->subspace_diagonalization_mp(hp, mp, eigen_values, print_flag);
+        this->subspace_diagonalization_mp(hp, mp, eigen_values, print_flag,
+                                          pool_fast, pool_cap);
         #ifdef USE_KML
         BlasSetNumThreadsLocal(rotation_nthread);
         #endif
@@ -690,13 +732,14 @@ template<typename T>
 void Chefsi<T>::chebyshev_filtering_column_wise_mp(
                     T*& __restrict__ eigen_vectors,
                     T*& __restrict__ eigen_vectors_buffer,
+                    T* const eigen_vectors_m1_panel,
                     T const* const __restrict__ Vloc,
                     const Effective_potential_nloc<T>& Vnloc,
                     const bool print_flag,
                     Memory_pool<T, Fast_memory>& pool_fast,
                     Memory_pool<T, Capacity_memory>& pool_cap) {
     (void) print_flag;
-    T *const eigen_vectors_in = eigen_vectors;
+    T* const eigen_vectors_in = eigen_vectors;
 
     Memory_pool_scope<Memory_pool<T, Fast_memory>> scope_fast(pool_fast);
     Memory_pool_scope<Memory_pool<T, Capacity_memory>> scope_cap(pool_cap);
@@ -760,7 +803,8 @@ void Chefsi<T>::chebyshev_filtering_column_wise_mp(
         return;
     }
 
-    T* eigen_vectors_m1 = pool_fast.allocate(Nd * nb);
+    assert(eigen_vectors_m1_panel != nullptr);
+    T* eigen_vectors_m1 = eigen_vectors_m1_panel;
 
     std::swap(eigen_vectors_m1, eigen_vectors);
     std::swap(eigen_vectors, eigen_vectors_temp);
@@ -810,7 +854,12 @@ void Chefsi<T>::chebyshev_filtering_column_wise_mp(
         this->chefsi_timer.filter.stop();
     #endif //ENABLE_CHEFSI_TIMER
 
-    assert(eigen_vectors_in == eigen_vectors);
+    if (eigen_vectors != eigen_vectors_in) {
+        #pragma omp parallel
+        Linalg::set_value_general(eigen_vectors_in, eigen_vectors, Nd * nb);
+        eigen_vectors = eigen_vectors_in;
+    }
+    assert(eigen_vectors == eigen_vectors_in);
     return;
 }
 
@@ -824,31 +873,56 @@ void Chefsi<T>::project_hamiltonian_mp(T const* const eigen_vectors, T const* co
     Memory_pool_scope<Memory_pool<T, Fast_memory>> scope_fast(pool_fast);
     Memory_pool_scope<Memory_pool<T, Capacity_memory>> scope_cap(pool_cap);
     #ifdef ENABLE_CHEFSI_TIMER
-        this->chefsi_timer.projection.start();
+        this->chefsi_timer.projection_gemm.start();
     #endif //ENABLE_CHEFSI_TIMER
 
     if (this->chefsi_control.projection_method == 0) {
         assert(this->domain_vertices.comm == MPI_COMM_SELF);
         const uint m = this->dp_domain_vertices.shared_vertices.get_nb();
         const uint k = this->dp_domain_vertices.local_vertices.Vertices_3D::get_size();
-        Linalg::cblas__gemm<T>(CblasColMajor, CblasTrans, CblasNoTrans, m, m, k, T(1.0),
-                            eigen_vectors, k, h_eigen_vectors, k, T(0.0), hp, m);
-        Linalg::cblas__syrk(CblasColMajor, CblasUpper, CblasTrans, m, k, T(1.0),
-                                    eigen_vectors, k, T(0.0), mp, m);
+        if (Xlsdft_chefsi_lvtx::projection_contract_matches<T>(m, k)) {
+            if constexpr (std::is_same_v<T, double>) {
+                const std::size_t workspace_doubles =
+                    Xlsdft_backend::projection_workspace_doubles();
+                double* workspace = pool_fast.allocate(workspace_doubles);
+                const int status = Xlsdft_chefsi_lvtx::project_hamiltonian(
+                    eigen_vectors, h_eigen_vectors, hp, mp, workspace,
+                    workspace_doubles);
+                Xlsdft_backend::require_success(
+                    Xlsdft_backend::Operation::dgemm_poj, status,
+                    this->domain_vertices.comm,
+                    {"projected_hamiltonian", m, m, k,
+                     static_cast<std::int64_t>(k), static_cast<std::int64_t>(k),
+                     static_cast<std::int64_t>(m), eigen_vectors, h_eigen_vectors,
+                     hp, workspace, workspace_doubles});
+            } else {
+                Xlsdft_chefsi_lvtx::project_hamiltonian_fallback(
+                    m, k, eigen_vectors, h_eigen_vectors, hp, mp);
+            }
+        } else {
+            Xlsdft_chefsi_lvtx::project_hamiltonian_fallback(
+                m, k, eigen_vectors, h_eigen_vectors, hp, mp);
+        }
+        #ifdef ENABLE_CHEFSI_TIMER
+            this->chefsi_timer.projection_gemm.stop();
+            this->chefsi_timer.projection_syrk.stop();
+        #endif //ENABLE_CHEFSI_TIMER
     }  else {
         assert(this->chefsi_control.projection_method == 0);
     }
 
-    #ifdef ENABLE_CHEFSI_TIMER
-            this->chefsi_timer.projection.stop();
-    #endif //ENABLE_CHEFSI_TIMER
     return;
 }
 
 template<typename T>
 void Chefsi<T>::subspace_diagonalization_mp(T* const __restrict__ hp, T* const __restrict__ mp,
-                                         T* const __restrict__ eigen_values, const bool print_flag) {
+                                         T* const __restrict__ eigen_values, const bool print_flag,
+                                         Memory_pool<T, Fast_memory>& pool_fast,
+                                         Memory_pool<T, Capacity_memory>& pool_cap) {
     (void) print_flag;
+    Memory_pool_scope<Memory_pool<T, Fast_memory>> scope_fast(pool_fast);
+    (void)pool_cap;
+
     #ifdef ENABLE_CHEFSI_TIMER
         this->chefsi_timer.diagonalization.start();
     #endif //ENABLE_CHEFSI_TIMER
@@ -856,28 +930,27 @@ void Chefsi<T>::subspace_diagonalization_mp(T* const __restrict__ hp, T* const _
     if (this->chefsi_control.projection_method == 0) {
         uint nstate = this->dp_domain_vertices.shared_vertices.get_nb();
         if (this->dp_domain_vertices.get_comm_rank() == 0) {
-            
-            #ifdef USE_LAPACK
-            int info = Linalg::LAPACKE__sygvd_org<T>(LAPACK_COL_MAJOR, 1, 'V', 'U', nstate,
-                                               hp, nstate, mp, nstate, eigen_values);
-            if(info != 0) {
-                char hostname[256] = "unknown";
-                if(gethostname(hostname, sizeof(hostname)) == 0) {
-                    hostname[sizeof(hostname) - 1] = '\0';
+            const std::size_t workspace_doubles =
+                Xlsdft_backend::dsygvd_workspace_doubles(
+                    static_cast<int>(nstate));
+            if constexpr (std::is_same_v<T, double>) {
+                double* workspace = pool_fast.allocate(workspace_doubles);
+                const int info = Xlsdft_chefsi_lvtx::dsygvd_upper(
+                    static_cast<int>(nstate), hp, mp, eigen_values, workspace,
+                    workspace_doubles);
+                Xlsdft_backend::require_success(
+                    Xlsdft_backend::Operation::dsygvd_upper, info,
+                    this->dp_domain_vertices.comm,
+                    {"generalized_upper_eigensolve", nstate, nstate, 0, nstate,
+                     nstate, 0, hp, mp, eigen_values, workspace,
+                     workspace_doubles});
+            } else {
+                const int info = Xlsdft_chefsi_lvtx::dsygvd_upper(
+                    static_cast<int>(nstate), hp, mp, eigen_values, nullptr, 0);
+                if (info != 0) {
+                    assert(false);
                 }
-                std::fprintf(
-                    stderr,
-                    "LAPACKE__sygvd_org failed on node %s: info = %d\n",
-                    hostname,
-                    info
-                );
-                std::fflush(stderr);
             }
-            assert(info == 0);
-            #else
-            assert(!"LAPACKE__sygvd should be involved with LAPACKE loaded");
-            (void) mp;
-            #endif
         }
         MPI_Datatype mpi_datatype = Linalg::get_mpi_datatype<T>();
         MPI_Bcast(eigen_values, nstate, mpi_datatype, 0, this->dp_domain_vertices.comm);
@@ -891,6 +964,64 @@ void Chefsi<T>::subspace_diagonalization_mp(T* const __restrict__ hp, T* const _
     #ifdef ENABLE_CHEFSI_TIMER
         this->chefsi_timer.diagonalization.stop();
     #endif //ENABLE_CHEFSI_TIMER
+
+    return;
+}
+
+template<typename T>
+void Chefsi<T>::subspace_diagonalization_mp_opt(
+    T* const __restrict__ hp, T* const __restrict__ mp,
+    T* const __restrict__ eigen_values, const bool print_flag,
+    Memory_pool<T, Fast_memory>& pool_fast,
+    Memory_pool<T, Capacity_memory>& pool_cap) {
+    (void)print_flag;
+    Memory_pool_scope<Memory_pool<T, Fast_memory>> scope_fast(pool_fast);
+    (void)pool_cap;
+
+#ifdef ENABLE_CHEFSI_TIMER
+    this->chefsi_timer.diagonalization.start();
+#endif
+
+    if (this->chefsi_control.projection_method == 0) {
+        uint nstate = this->dp_domain_vertices.shared_vertices.get_nb();
+        if (this->dp_domain_vertices.get_comm_rank() == 0) {
+            const std::size_t workspace_doubles =
+                Xlsdft_backend::dsygvd_workspace_doubles(
+                    static_cast<int>(nstate));
+            if constexpr (std::is_same_v<T, double>) {
+                double* workspace = pool_fast.allocate(workspace_doubles);
+                const int info = Xlsdft_chefsi_lvtx::dsygvd_upper_opt(
+                    static_cast<int>(nstate), hp, mp, eigen_values, workspace,
+                    workspace_doubles);
+                Xlsdft_backend::require_success(
+                    Xlsdft_backend::Operation::dsygvd_upper, info,
+                    this->dp_domain_vertices.comm,
+                    {"generalized_upper_eigensolve_opt", nstate, nstate, 0,
+                     nstate, nstate, 0, hp, mp, eigen_values, workspace,
+                     workspace_doubles});
+            } else {
+                const int info = Xlsdft_chefsi_lvtx::dsygvd_upper_opt(
+                    static_cast<int>(nstate), hp, mp, eigen_values, nullptr, 0);
+                if (info != 0) {
+                    assert(false);
+                }
+            }
+        }
+        MPI_Datatype mpi_datatype = Linalg::get_mpi_datatype<T>();
+        MPI_Bcast(eigen_values, nstate, mpi_datatype, 0,
+                  this->dp_domain_vertices.comm);
+        if (this->dp_domain_vertices.local_vertices.Vertices_3D::get_size() >
+            0) {
+            MPI_Bcast(hp, nstate * nstate, mpi_datatype, 0,
+                      this->dp_domain_vertices.domain_3d_comm);
+        }
+    } else {
+        assert(this->chefsi_control.projection_method == 0);
+    }
+
+#ifdef ENABLE_CHEFSI_TIMER
+    this->chefsi_timer.diagonalization.stop();
+#endif
 
     return;
 }
@@ -912,11 +1043,28 @@ void Chefsi<T>::subspace_rotation_mp(T const* const __restrict__ eigen_vectors_i
         uint n = this->dp_domain_vertices.local_vertices.get_nb();
         assert(this->domain_vertices.comm == MPI_COMM_SELF);
         if (m > 0) {
-            // Linalg::set_kblas_nthread();
-            Linalg::cblas__gemm<T>(CblasColMajor, CblasNoTrans, CblasNoTrans, m, n, n, T(1.0),
-                            eigen_vectors_in, m, qp, n, T(0.0), eigen_vectors_out, m);
-            // Linalg::set_kblas_1();
-            // Linalg::matrix_product(eigen_vectors_reshape, 1, qp, 1, eigen_vectors, 1, m, n, n);
+            if (Xlsdft_chefsi_lvtx::rotation_contract_matches<T>(m, n)) {
+                if constexpr (std::is_same_v<T, double>) {
+                    const std::size_t workspace_doubles =
+                        Xlsdft_backend::rotation_workspace_doubles();
+                    double* const workspace =
+                        pool_fast.allocate(workspace_doubles);
+                    const int status = Xlsdft_chefsi_lvtx::rotate_subspace(
+                        eigen_vectors_in, qp, eigen_vectors_out, workspace,
+                        workspace_doubles);
+                    Xlsdft_backend::require_success(
+                        Xlsdft_backend::Operation::dgemm_rotation, status,
+                        this->domain_vertices.comm,
+                        {"subspace_rotation", m, n, n, m, n, m, eigen_vectors_in,
+                         qp, eigen_vectors_out, workspace, workspace_doubles});
+                } else {
+                    Xlsdft_chefsi_lvtx::rotate_subspace_fallback(
+                        m, n, eigen_vectors_in, qp, eigen_vectors_out);
+                }
+            } else {
+                Xlsdft_chefsi_lvtx::rotate_subspace_fallback(
+                    m, n, eigen_vectors_in, qp, eigen_vectors_out);
+            }
         }
     } else {
         assert(this->chefsi_control.projection_method == 0);
@@ -929,5 +1077,28 @@ void Chefsi<T>::subspace_rotation_mp(T const* const __restrict__ eigen_vectors_i
     return;
 }
 
-template class Chefsi<float>;
-template class Chefsi<double>;
+#define CHEFSI_DOUBLE_EXPLICIT_INST(T)                                                          \
+  template void Chefsi<T>::run_mp(                                                              \
+      T*&, T* const, T const* const, Effective_potential_nloc<T> const&, bool);                \
+  template void Chefsi<T>::run_mp(                                                              \
+      T*&, T*&, T* const, T const* const, Effective_potential_nloc<T> const&, bool,            \
+      Memory_pool<T, Fast_memory>&, Memory_pool<T, Capacity_memory>&);                         \
+  template void Chefsi<T>::chebyshev_filtering_column_wise_mp(                                  \
+      T*&, T*&, T* const, T const* const, Effective_potential_nloc<T> const&, bool,            \
+      Memory_pool<T, Fast_memory>&, Memory_pool<T, Capacity_memory>&);                          \
+  template void Chefsi<T>::project_hamiltonian_mp(                                              \
+      T const* const, T const* const, T* const, T* const, bool,                                \
+      Memory_pool<T, Fast_memory>&, Memory_pool<T, Capacity_memory>&);                         \
+  template void Chefsi<T>::subspace_diagonalization_mp(                                         \
+      T* const, T* const, T* const, bool, Memory_pool<T, Fast_memory>&,                           \
+      Memory_pool<T, Capacity_memory>&);                                                          \
+  template void Chefsi<T>::subspace_diagonalization_mp_opt(                                     \
+      T* const, T* const, T* const, bool, Memory_pool<T, Fast_memory>&,                           \
+      Memory_pool<T, Capacity_memory>&);                                                          \
+  template void Chefsi<T>::subspace_rotation_mp(                                                \
+      T const* const, T* const, T const* const, bool,                                          \
+      Memory_pool<T, Fast_memory>&, Memory_pool<T, Capacity_memory>&);
+
+CHEFSI_DOUBLE_EXPLICIT_INST(float)
+CHEFSI_DOUBLE_EXPLICIT_INST(double)
+#undef CHEFSI_DOUBLE_EXPLICIT_INST

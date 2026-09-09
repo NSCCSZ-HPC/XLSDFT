@@ -162,8 +162,8 @@ template<typename T>
 void Density_solver<T>::solve_density_matrix_mp(T const* const effective_potentail_loc,
                                                 const Vertices_3D& effective_potentail_loc_vertices) {
     constexpr size_t GB = 1024 * 1024 * 1024 / sizeof(T);
-    Memory_pool<T, Fast_memory> pool_fast(3.5 * GB);
-    Memory_pool<T, Capacity_memory> pool_cap(3.5 * GB);
+    Memory_pool<T, Fast_memory> pool_fast(3.75 * GB);
+    Memory_pool<T, Capacity_memory> pool_cap(3.75 * GB);
     this->solve_density_matrix_mp(effective_potentail_loc, effective_potentail_loc_vertices, pool_fast, pool_cap);
     // std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
     // Array_3D<T> effective_potentail_loc_reshape(this->domain_vertices_with_band.get_3D_local_vertices());
@@ -545,8 +545,8 @@ void Density_solver<T>::run(const std::vector<Array_3D<T>>& effective_potentail_
 template<typename T>
 void Density_solver<T>::run_mp(T const* const* const effective_potentail_locs) {
     constexpr size_t GB = 1024 * 1024 * 1024 / sizeof(T);
-    Memory_pool<T, Fast_memory> pool_fast(3.5 * GB);
-    Memory_pool<T, Capacity_memory> pool_cap(3.5 * GB);
+    Memory_pool<T, Fast_memory> pool_fast(3.75 * GB);
+    Memory_pool<T, Capacity_memory> pool_cap(3.75 * GB);
     this->run_mp(effective_potentail_locs, pool_fast, pool_cap);
     // #ifdef ENABLE_DENSITY_SOLVER_TIMER
     //     this->density_solver_timer.reset();
@@ -683,6 +683,14 @@ void Density_solver<T>::run_mp(T const* const* const effective_potentail_locs) {
     //     ofs.close();
     //     MPI_Barrier(this->domain_vertices.comm);
     // #endif //ENABLE_TIMER
+    return;
+}
+
+template<typename T>
+void Density_solver<T>::reserve_retained_packed_pool(Memory_pool<T, Fast_memory>& pool_fast) {
+    if (this->density_solver_control.method == 1) {
+        this->density_matrix_solver.reserve_retained_packed_pool(pool_fast);
+    }
     return;
 }
 
@@ -935,8 +943,7 @@ void Density_solver<T>::print_timer_statistics(
 
             t_locals[count++] +=
                 chefsi_timer
-                    .projection
-                    .time_cost_millisecond_double();
+                    .projection_time_cost_millisecond();
 
             t_locals[count++] +=
                 chefsi_timer
