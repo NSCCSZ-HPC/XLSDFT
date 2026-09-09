@@ -4,6 +4,7 @@
 #include "parallel_vertices.h"
 #include "control.h"
 #include "chefsi.h"
+#include "xlsdft_nchi_diag.hpp"
 
 #if !defined(ENABLE_EIGEN_SOLVER_TIMER) && defined(ENABLE_TIMER)
 #define ENABLE_EIGEN_SOLVER_TIMER
@@ -59,6 +60,7 @@ public:
     Domain_parallel_vertices_4D intra_band_domain_vertices;
     Exarr_4D_mpi_package intra_band_exarr_mpi_package;
     Chefsi<T> chefsi;
+    Xlsdft_element_workload_diag element_workload_diag;
     Eigen_solver(const Eigen_solver_control& eigen_solver_control,
                  const Mesh_control& mesh_control,
                  const Geometry& geometry,
@@ -106,6 +108,9 @@ public:
     void run(const Array_3D<T>& effective_potentail_loc, const bool print_flag = true);
     void run_mp(T const* const effective_potentail_loc, const bool print_flag);
     void run_mp(T*& eigen_vectors_in, T*& eigen_vectors_out, T const* const effective_potentail_loc,
+            const bool print_flag, Memory_pool<T, Fast_memory>& pool_fast, Memory_pool<T, Capacity_memory>& pool_cap);
+    void run_mp_opt(T const* const effective_potentail_loc, const bool print_flag);
+    void run_mp_opt(T*& eigen_vectors_in, T*& eigen_vectors_out, T const* const effective_potentail_loc,
             const bool print_flag, Memory_pool<T, Fast_memory>& pool_fast, Memory_pool<T, Capacity_memory>& pool_cap);
     void print_runtime_result();
     double evalutate_flops();

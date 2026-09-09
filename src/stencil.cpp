@@ -1178,7 +1178,7 @@ int64_t generate_gradient_stride(const Vertices_3D& ex_vertices, const uint& dir
         break;
     default:
         assert(!"ERROR:: only x,y,z dir is supported~");
-        break;
+        return 0;
     }
 }
 

@@ -88,6 +88,7 @@ public:
     void run_mp(T const* const* const effective_potentail_locs);
     void run_mp(T const* const* const effective_potentail_locs,
                 Memory_pool<T, Fast_memory>& pool_fast, Memory_pool<T, Capacity_memory>& pool_cap);
+    void reserve_retained_packed_pool(Memory_pool<T, Fast_memory>& pool_fast);
     #if defined(ENABLE_TIMER)
     void print_timer_statistics(const bool if_print, std::ostream& output) const;
     #endif

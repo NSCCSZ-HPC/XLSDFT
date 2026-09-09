@@ -23,6 +23,10 @@ public:
     Array_2D<T> chi;
     Array_0D<T> gamma;
     std::vector<uint> index;
+#ifdef USE_HBM
+    uint index_hbm_length = 0;
+    uint* index_hbm = nullptr;
+#endif
     Nloc_projector(const Psp8_file& psp8_file);
     Nloc_projector(const Nloc_projector<T>& nloc_projector);
     template<typename T2> Nloc_projector(const Nloc_projector<T2>& nloc_projector);
@@ -42,6 +46,7 @@ public:
     void destructor();
     void destructor_mp();
     void show(std::ostream& output = std::cout) const;
+    uint const* index_data() const;
 };
 
 namespace Nloc_projector_method {

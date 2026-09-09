@@ -1,4 +1,5 @@
 #include "scf.h"
+#include <cstdlib>
 
 Scf::Scf(const Preparation& preparation,
          const MPI_Comm& comm)
@@ -1035,8 +1036,11 @@ void Scf::run_mp() {
     }
     
     constexpr size_t GB = 1024 * 1024 * 1024 / sizeof(double);
-    Memory_pool<double, Fast_memory> pool_fast(3.5 * GB);
-    Memory_pool<double, Capacity_memory> pool_cap(3.5 * GB);
+    Memory_pool<double, Fast_memory> pool_fast(3.75 * GB);
+    Memory_pool<double, Capacity_memory> pool_cap(3.75 * GB);
+    if (std::getenv("CHEFSI_USE_OPT") != nullptr) {
+        this->ddensity_solver.reserve_retained_packed_pool(pool_fast);
+    }
     while (iter < this->scf_control.max_iter) {
         if (this->domain_vertices.get_comm_rank() == 0) std::cout << "\nSCF loop " << iter + 1 << " start."<< std::endl;
         std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
@@ -1142,7 +1146,10 @@ void Scf::run_mp(Memory_pool<double, Fast_memory>& pool_fast, Memory_pool<double
         Linalg::set_value_general(this->dmixing.x_km1.data,
             this->ddensity_solver.electron_densities[0].data, this->dmixing.x_km1.length);
     }
- 
+    if (std::getenv("CHEFSI_USE_OPT") != nullptr) {
+        this->ddensity_solver.reserve_retained_packed_pool(pool_fast);
+    }
+
     while (iter < this->scf_control.max_iter) {
         if (this->domain_vertices.get_comm_rank() == 0) std::cout << "\nSCF loop " << iter + 1 << " start."<< std::endl;
         std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();

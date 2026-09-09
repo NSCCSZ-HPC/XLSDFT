@@ -1121,10 +1121,14 @@ void Chefsi_control::init(const Input_file& input_file) {
     if (input_file.map.find("CHEFSI_PROJECTION_METHOD") != input_file.map.end()) {
         this->set_projection_method(std::stoi(input_file.get_value("CHEFSI_PROJECTION_METHOD")));
         #if !(defined(USE_MKL) || defined(USE_SCALAPACK))
-            if (this->projection_method == 0
-             || this->projection_method == 1) {
-                assert(!"To use scalapack functions should turn on USE_MKL or USE_SCALAPACK, when CHEFSI_PROJECTION_METHOD == 0 || CHEFSI_PROJECTION_METHOD == 1");
+            if (this->projection_method == 1) {
+                assert(!"To use scalapack functions should turn on USE_MKL or USE_SCALAPACK, when CHEFSI_PROJECTION_METHOD == 1");
             }
+            #if !defined(USE_LAPACK)
+            if (this->projection_method == 0 || this->projection_method == 2) {
+                assert(!"To use projection_method 0 or 2 should turn on USE_LAPACK (LAPACKE sygvd) or USE_MKL/USE_SCALAPACK");
+            }
+            #endif
         #endif
     }
     return;

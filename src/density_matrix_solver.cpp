@@ -404,8 +404,8 @@ void Density_matrix_solver<T>::run(const Array_3D<T>& effective_potentail_loc) {
 template<typename T>
 void Density_matrix_solver<T>::run_mp(T const* const effective_potentail_loc) {
     constexpr size_t GB = 1024 * 1024 * 1024 / sizeof(T);
-    Memory_pool<T, Fast_memory> pool_fast(3.5 * GB);
-    Memory_pool<T, Capacity_memory> pool_cap(3.5 * GB);
+    Memory_pool<T, Fast_memory> pool_fast(3.75 * GB);
+    Memory_pool<T, Capacity_memory> pool_cap(3.75 * GB);
     this->run_mp(effective_potentail_loc, pool_fast, pool_cap);
     // #ifdef ENABLE_DENSITY_MATRIX_TIMER
     //     this->density_matrix_solver_timer.reset();
@@ -450,6 +450,14 @@ void Density_matrix_solver<T>::run_mp(T const* const effective_potentail_loc) {
     //     this->density_matrix_solver_timer.density_matrix_solver.stop();
     //     if (this->domain_vertices.get_comm_rank() == 0) this->density_matrix_solver_timer.show();
     // #endif //ENABLE_DENSITY_MATRIX_TIMER
+    return;
+}
+
+template<typename T>
+void Density_matrix_solver<T>::reserve_retained_packed_pool(Memory_pool<T, Fast_memory>& pool_fast) {
+    if (this->density_matrix_solver_control.method == 0) {
+        this->xlsdft.reserve_retained_packed_pool(pool_fast);
+    }
     return;
 }
 
@@ -559,7 +567,7 @@ void Density_matrix_solver<T>::print_timer_statistics(const bool if_print, std::
                 this->xlsdft.eigen_solvers[ielement].chefsi.chefsi_timer.H_psi.time_cost_millisecond();
 
             t_locals[count++] +=
-                this->xlsdft.eigen_solvers[ielement].chefsi.chefsi_timer.projection.time_cost_millisecond();
+                this->xlsdft.eigen_solvers[ielement].chefsi.chefsi_timer.projection_time_cost_millisecond();
 
             t_locals[count++] +=
                 this->xlsdft.eigen_solvers[ielement].chefsi.chefsi_timer.diagonalization.time_cost_millisecond();

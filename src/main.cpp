@@ -35,8 +35,8 @@ int main(int argc, char *argv[]) {
 
         const MPI_Comm comm = MPI_COMM_WORLD;
         constexpr size_t GB = 1024 * 1024 * 1024 / sizeof(double);
-        Memory_pool<double, Fast_memory> pool_fast(30 * GB / 10);
-        Memory_pool<double, Capacity_memory> pool_cap(30 * GB / 10);
+        Memory_pool<double, Fast_memory> pool_fast(38 * GB / 10);
+        Memory_pool<double, Capacity_memory> pool_cap(10 * GB / 10);
         // Scf scf(preparation, MPI_COMM_WORLD);
         Scf scf(preparation.control, preparation.geometry, preparation.psp8_files, comm);
         scf.init();

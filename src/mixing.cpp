@@ -1,4 +1,104 @@
 #include "mixing.h"
+#include "xlsdft_backend.h"
+
+#include <limits>
+#include <type_traits>
+
+namespace {
+
+template<typename T>
+void solve_pulay_fallback(const uint history, T* matrix, T* rhs) {
+    if (history == 0) return;
+    T scale = T(0);
+    for (uint i = 0; i < history; ++i) {
+        scale = std::max(scale, std::abs(matrix[i + static_cast<std::size_t>(i) * history]));
+    }
+    const T regularization = std::max(scale, T(1))
+                           * std::numeric_limits<T>::epsilon()
+                           * static_cast<T>(64 * history);
+    for (uint i = 0; i < history; ++i) {
+        matrix[i + static_cast<std::size_t>(i) * history] += regularization;
+    }
+
+    for (uint pivot_column = 0; pivot_column < history; ++pivot_column) {
+        uint pivot_row = pivot_column;
+        T pivot_magnitude = std::abs(
+            matrix[pivot_row + static_cast<std::size_t>(pivot_column) * history]);
+        for (uint row = pivot_column + 1; row < history; ++row) {
+            const T magnitude = std::abs(
+                matrix[row + static_cast<std::size_t>(pivot_column) * history]);
+            if (magnitude > pivot_magnitude) {
+                pivot_magnitude = magnitude;
+                pivot_row = row;
+            }
+        }
+        if (pivot_row != pivot_column) {
+            for (uint column = 0; column < history; ++column) {
+                std::swap(matrix[pivot_column + static_cast<std::size_t>(column) * history],
+                          matrix[pivot_row + static_cast<std::size_t>(column) * history]);
+            }
+            std::swap(rhs[pivot_column], rhs[pivot_row]);
+        }
+        const T pivot = matrix[pivot_column +
+                               static_cast<std::size_t>(pivot_column) * history];
+        if (std::abs(pivot) <= regularization) continue;
+        for (uint row = pivot_column + 1; row < history; ++row) {
+            const T factor = matrix[row +
+                                    static_cast<std::size_t>(pivot_column) * history] / pivot;
+            matrix[row + static_cast<std::size_t>(pivot_column) * history] = T(0);
+            for (uint column = pivot_column + 1; column < history; ++column) {
+                matrix[row + static_cast<std::size_t>(column) * history] -=
+                    factor * matrix[pivot_column +
+                                    static_cast<std::size_t>(column) * history];
+            }
+            rhs[row] -= factor * rhs[pivot_column];
+        }
+    }
+    for (uint reverse = history; reverse-- > 0;) {
+        T value = rhs[reverse];
+        for (uint column = reverse + 1; column < history; ++column) {
+            value -= matrix[reverse + static_cast<std::size_t>(column) * history]
+                   * rhs[column];
+        }
+        const T pivot = matrix[reverse + static_cast<std::size_t>(reverse) * history];
+        rhs[reverse] = std::abs(pivot) > regularization ? value / pivot : T(0);
+    }
+}
+
+template<typename T>
+int solve_pulay_via_f64(const uint history, T* matrix, T* rhs, T* singular_values) {
+    const std::size_t matrix_count = static_cast<std::size_t>(history) * history;
+    double* matrix_f64 = new (std::align_val_t(64)) double[matrix_count];
+    double* rhs_f64 = new (std::align_val_t(64)) double[history];
+    double* singular_values_f64 = new (std::align_val_t(64)) double[history];
+    const std::size_t workspace_doubles =
+        Xlsdft_backend::pulay_gelsd_workspace_doubles(static_cast<int>(history));
+    double* workspace = new (std::align_val_t(64)) double[workspace_doubles];
+    alignas(64) int rank = 0;
+    for (std::size_t i = 0; i < matrix_count; ++i) {
+        matrix_f64[i] = static_cast<double>(matrix[i]);
+    }
+    for (uint i = 0; i < history; ++i) rhs_f64[i] = static_cast<double>(rhs[i]);
+    const int status = Xlsdft_backend::pulay_gelsd(
+        static_cast<int>(history), matrix_f64, static_cast<int>(history), rhs_f64,
+        singular_values_f64, -1.0, &rank, workspace, workspace_doubles);
+    if (status == 0) {
+        for (std::size_t i = 0; i < matrix_count; ++i) {
+            matrix[i] = static_cast<T>(matrix_f64[i]);
+        }
+        for (uint i = 0; i < history; ++i) {
+            rhs[i] = static_cast<T>(rhs_f64[i]);
+            singular_values[i] = static_cast<T>(singular_values_f64[i]);
+        }
+    }
+    ::operator delete[](workspace, std::align_val_t(64));
+    ::operator delete[](singular_values_f64, std::align_val_t(64));
+    ::operator delete[](rhs_f64, std::align_val_t(64));
+    ::operator delete[](matrix_f64, std::align_val_t(64));
+    return status;
+}
+
+}  // namespace
 
 template<typename T>
 Mixing<T>::Mixing(const Mixing_control& mixing_control,
@@ -883,21 +983,29 @@ void Mixing_method::Anderson_extrapolation_weighted_averaged_vectors_mp(const in
         // find weighted average x_{k+1} = x_k - R*Gamma
         #pragma omp parallel
         Linalg::set_value_general(x_wavg, x_k, N);
-        // Linalg::matrix_vector_product(R, 1, Gamma, x_wavg, N, m, (T)-1.0, (T)1.0);
-        Linalg::cblas__gemv(CblasColMajor, CblasNoTrans,
-                            N, m,
-                            T(-1.0), R, N,
-                            Gamma, 1,
-                            T(1.0), x_wavg, 1);
         // find weighted average f_{k+1} = f_k - F*Gamma
         #pragma omp parallel
         Linalg::set_value_general(f_wavg, f_k, N);
-        // Linalg::matrix_vector_product(F, 1, Gamma, f_wavg, N, m, (T)-1.0, (T)1.0);
-        Linalg::cblas__gemv(CblasColMajor, CblasNoTrans,
-                            N, m,
-                            T(-1.0), F, N,
-                            Gamma, 1,
-                            T(1.0), f_wavg, 1);
+        if constexpr (std::is_same_v<T, double>) {
+            int status = Xlsdft_backend::pulay_update(N, m, R, N, Gamma, x_wavg);
+            Xlsdft_backend::require_success(Xlsdft_backend::Operation::pulay_update,
+                status, comm,
+                {"pulay_update_x", N, 1, m, N, 0, N,
+                 R, Gamma, x_wavg, nullptr, 0});
+            status = Xlsdft_backend::pulay_update(N, m, F, N, Gamma, f_wavg);
+            Xlsdft_backend::require_success(Xlsdft_backend::Operation::pulay_update,
+                status, comm,
+                {"pulay_update_f", N, 1, m, N, 0, N,
+                 F, Gamma, f_wavg, nullptr, 0});
+        } else {
+            for (int column = 0; column < m; ++column) {
+                const T weight = Gamma[column];
+                for (int row = 0; row < N; ++row) {
+                    x_wavg[row] -= R[row + static_cast<std::size_t>(column) * N] * weight;
+                    f_wavg[row] -= F[row + static_cast<std::size_t>(column) * N] * weight;
+                }
+            }
+        }
     }
 
     // delete [] Gamma;
@@ -1006,12 +1114,8 @@ void Mixing_method::Anderson_history_vector_ompunnested(const uint N, const uint
 
     // find weighted average history_v = XF_{k} * Gamma, dim(N,1)
     if (N > 0) {
-        // Linalg::matrix_vector_product(XF, 1, Gamma, history_v, N, m);
-        Linalg::cblas__gemv(CblasColMajor, CblasNoTrans,
-                            N, m,
-                            T(1.0), XF, N,
-                            Gamma, 1,
-                            T(0.0), history_v, 1);
+        #pragma omp parallel
+        Linalg::matrix_vector_product(XF, 1, Gamma, history_v, N, m);
     }
     delete [] XF;
     delete [] Gamma;
@@ -1048,12 +1152,8 @@ void Mixing_method::Anderson_history_vector_ompunnested_mp(const uint N, const u
 
     // find weighted average history_v = XF_{k} * Gamma, dim(N,1)
     if (N > 0) {
-        // Linalg::matrix_vector_product(XF, 1, Gamma, history_v, N, m);
-        Linalg::cblas__gemv(CblasColMajor, CblasNoTrans,
-                            N, m,
-                            T(1.0), XF, N,
-                            Gamma, 1,
-                            T(0.0), history_v, 1);
+        #pragma omp parallel
+        Linalg::matrix_vector_product(XF, 1, Gamma, history_v, N, m);
     }
     // delete [] XF;
     // delete [] Gamma;
@@ -1079,87 +1179,32 @@ template void Mixing_method::Anderson_history_vector_ompunnested_mp<double>(cons
  */
 template<typename T>
 void Mixing_method::cal_Gamma(const uint N, const uint m,
-                              T const* const __restrict__ F, T const* const __restrict__ f,
-                              T* const __restrict__ Gamma, const MPI_Comm comm) {
-    MPI_Datatype mpi_datatype = Linalg::get_mpi_datatype<T>();
-    #ifdef USE_OPENMP
-
-    static T* FtF_static = nullptr;      // residual vector, r = b - Ax
-    static T* s_static = nullptr;
-    #pragma omp single nowait
-    FtF_static = new T [m * m]();
-    #pragma omp single nowait
-    s_static = new T [m]();
-    #pragma omp barrier
-    T* const FtF = FtF_static;
-    T* const s = s_static;
-
-    #pragma omp parallel
+                              T const* const __restrict__ F,
+                              T const* const __restrict__ f,
+                              T* const __restrict__ Gamma,
+                              const MPI_Comm comm) {
+    if (m == 0) return;
+    T* FtF = new (std::align_val_t(64)) T[static_cast<std::size_t>(m) * m];
     if (N > 0) {
-        Linalg::matrix_product(F, 0, F, 1, FtF, 1, m, m, N);
-        Linalg::matrix_vector_product(F, 0, f, Gamma, m, N);
-    } else {
-        Linalg::set_value_general(FtF, (T)0, m*m);
-        Linalg::set_value_general(Gamma, (T)0, m);
-    }
-    #pragma omp barrier
-    #pragma omp master
-    {
-        int size;
-        MPI_Comm_size(comm, &size);
-        if (size > 1) {
-            MPI_Allreduce(MPI_IN_PLACE, FtF, m*m, mpi_datatype, MPI_SUM, comm);
-            MPI_Allreduce(MPI_IN_PLACE, Gamma, m, mpi_datatype, MPI_SUM, comm);
+        #pragma omp parallel
+        {
+            Linalg::matrix_product(F, 0, F, 1, FtF, 1, m, m, N);
+            Linalg::matrix_vector_product(F, 0, f, Gamma, m, N);
         }
-    }
-    #pragma omp barrier
-
-    #ifdef USE_LAPACK
-    int matrank;
-    Linalg::LAPACKE__gelsd<T>(LAPACK_COL_MAJOR, m, m, 1, FtF, m, Gamma, m, s, -1.0, &matrank);
-    #else //USE_LAPACK
-    assert(!"LAPACKE__gelsd should be involved with LAPACKE loaded");
-    #endif //USE_LAPACK
-
-    #pragma omp barrier
-    #pragma omp single nowait
-    {
-        delete [] FtF_static;
-        FtF_static = nullptr;
-    }
-    #pragma omp single nowait
-    {
-        delete [] s_static;
-        s_static = nullptr;
-    }
-
-    #else
-    T* FtF = new T [m*m];
-    if (N > 0) {
-        Linalg::matrix_product(F, 0, F, 1, FtF, 1, m, m, N);
-        Linalg::matrix_vector_product(F, 0, f, Gamma, m, N);
     } else {
-        Linalg::set_value_general(FtF, (T)0, m*m);
-        Linalg::set_value_general(Gamma, (T)0, m);
+        std::fill_n(FtF, static_cast<std::size_t>(m) * m, T(0));
+        std::fill_n(Gamma, m, T(0));
     }
-    int size;
-    MPI_Comm_size(comm, &size);
-    if (size > 1) {
-        MPI_Allreduce(MPI_IN_PLACE, FtF, m*m, mpi_datatype, MPI_SUM, comm);
-        MPI_Allreduce(MPI_IN_PLACE, Gamma, m, mpi_datatype, MPI_SUM, comm);
-    }
-    T* s = new T [m];
-    #ifdef USE_LAPACK
-    int matrank;
-    Linalg::LAPACKE__gelsd<T>(LAPACK_COL_MAJOR, m, m, 1, FtF, m, Gamma, m, s, -1.0, &matrank);
-    #else
-    assert(!"LAPACKE__gelsd should be involved with LAPACKE loaded");
-    #endif
 
-    delete [] s;
-    delete [] FtF;
-    #endif //USE_OPENMP
-    return;
+    int comm_size = 1;
+    MPI_Comm_size(comm, &comm_size);
+    if (comm_size > 1) {
+        const MPI_Datatype datatype = Linalg::get_mpi_datatype<T>();
+        MPI_Allreduce(MPI_IN_PLACE, FtF, m * m, datatype, MPI_SUM, comm);
+        MPI_Allreduce(MPI_IN_PLACE, Gamma, m, datatype, MPI_SUM, comm);
+    }
+    solve_pulay_fallback(m, FtF, Gamma);
+    ::operator delete[](FtF, std::align_val_t(64));
 }
 template void Mixing_method::cal_Gamma<float>(const uint N, const uint m, float const* const F,
                                               float const* const f, float* const Gamma, const MPI_Comm comm);
@@ -1167,48 +1212,11 @@ template void Mixing_method::cal_Gamma<double>(const uint N, const uint m, doubl
                                                double const* const f, double* const Gamma, const MPI_Comm comm);
 
 template<typename T>
-void Mixing_method::cal_Gamma_ompunnested(const uint N, const uint m,
-                              T const* const __restrict__ F, T const* const __restrict__ f,
-                              T* const __restrict__ Gamma, const MPI_Comm comm) {
-    T* FtF = new T [m*m];
-    if (N > 0) {
-        // Linalg::matrix_product(F, 0, F, 1, FtF, 1, m, m, N);
-        // Linalg::matrix_vector_product(F, 0, f, Gamma, m, N);
-        Linalg::cblas__gemm(CblasColMajor, CblasTrans, CblasNoTrans,
-                            m, m, N,
-                            T(1.0), F, N,
-                            F, N,
-                            T(0.0), FtF, m);
-        Linalg::cblas__gemv(CblasColMajor, CblasTrans,
-                            N, m,
-                            T(1.0), F, N,
-                            f, 1,
-                            T(0.0), Gamma, 1);
-    } else {
-        #pragma omp parallel 
-        {
-            Linalg::set_value_general(FtF, (T)0, m*m);
-            Linalg::set_value_general(Gamma, (T)0, m);
-        }
-    }
-    int size;
-    MPI_Comm_size(comm, &size);
-    if (size > 1) {
-        const MPI_Datatype mpi_datatype = Linalg::get_mpi_datatype<T>();
-        MPI_Allreduce(MPI_IN_PLACE, FtF, m*m, mpi_datatype, MPI_SUM, comm);
-        MPI_Allreduce(MPI_IN_PLACE, Gamma, m, mpi_datatype, MPI_SUM, comm);
-    }
-    T* s = new T [m];
-    #ifdef USE_LAPACK
-        int matrank;
-        Linalg::LAPACKE__gelsd_org<T>(LAPACK_COL_MAJOR, m, m, 1, FtF, m, Gamma, m, s, -1.0, &matrank);
-    #else
-        assert(!"LAPACKE__gelsd should be involved with LAPACKE loaded");
-    #endif
-
-    delete [] s;
-    delete [] FtF;
-    return;
+void Mixing_method::cal_Gamma_ompunnested(
+        const uint N, const uint m, T const* const __restrict__ F,
+        T const* const __restrict__ f, T* const __restrict__ Gamma,
+        const MPI_Comm comm) {
+    Mixing_method::cal_Gamma(N, m, F, f, Gamma, comm);
 }
 template void Mixing_method::cal_Gamma_ompunnested<float>(const uint N, const uint m, float const* const F,
                                               float const* const f, float* const Gamma, const MPI_Comm comm);
@@ -1216,54 +1224,93 @@ template void Mixing_method::cal_Gamma_ompunnested<double>(const uint N, const u
                                                double const* const f, double* const Gamma, const MPI_Comm comm);
 
 template<typename T>
-void Mixing_method::cal_Gamma_ompunnested_mp(const uint N, const uint m,
-                                            T const* const __restrict__ F, T const* const __restrict__ f,
-                                            T* const __restrict__ Gamma, const MPI_Comm comm,
-                                            Memory_pool<T, Fast_memory>& pool_fast,
-                                            Memory_pool<T, Capacity_memory>& pool_cap) {
+void Mixing_method::cal_Gamma_ompunnested_mp(
+        const uint N, const uint m, T const* const __restrict__ F,
+        T const* const __restrict__ f, T* const __restrict__ Gamma,
+        const MPI_Comm comm, Memory_pool<T, Fast_memory>& pool_fast,
+        Memory_pool<T, Capacity_memory>& pool_cap) {
     Memory_pool_scope<Memory_pool<T, Fast_memory>> scope_fast(pool_fast);
     Memory_pool_scope<Memory_pool<T, Capacity_memory>> scope_cap(pool_cap);
-    // T* FtF = new T [m*m];
-    T* FtF = pool_fast.allocate(m * m);
-    if (N > 0) {
-        // Linalg::matrix_product(F, 0, F, 1, FtF, 1, m, m, N);
-        // Linalg::matrix_vector_product(F, 0, f, Gamma, m, N);
-        Linalg::cblas__gemm(CblasColMajor, CblasTrans, CblasNoTrans,
-                            m, m, N,
-                            T(1.0), F, N,
-                            F, N,
-                            T(0.0), FtF, m);
-        Linalg::cblas__gemv(CblasColMajor, CblasTrans,
-                            N, m,
-                            T(1.0), F, N,
-                            f, 1,
-                            T(0.0), Gamma, 1);
-    } else {
-        #pragma omp parallel 
-        {
-            Linalg::set_value_general(FtF, (T)0, m*m);
-            Linalg::set_value_general(Gamma, (T)0, m);
-        }
+    if (m == 0) return;
+    #ifdef USE_OPENMP
+    if (omp_in_parallel()) {
+        Xlsdft_backend::require_success(
+            Xlsdft_backend::Operation::pulay_gram,
+            Xlsdft_backend::fixed_configuration_error, comm,
+            {"pulay_requires_serial_caller", m, 1, N, N, 0, m,
+             F, f, Gamma, nullptr, 0});
     }
-    int size;
-    MPI_Comm_size(comm, &size);
-    if (size > 1) {
-        const MPI_Datatype mpi_datatype = Linalg::get_mpi_datatype<T>();
-        MPI_Allreduce(MPI_IN_PLACE, FtF, m*m, mpi_datatype, MPI_SUM, comm);
-        MPI_Allreduce(MPI_IN_PLACE, Gamma, m, mpi_datatype, MPI_SUM, comm);
-    }
-    // T* s = new T [m];
-    T* s = pool_fast.allocate(m);
-    #ifdef USE_LAPACK
-        int matrank;
-        Linalg::LAPACKE__gelsd_org<T>(LAPACK_COL_MAJOR, m, m, 1, FtF, m, Gamma, m, s, -1.0, &matrank);
-    #else
-        assert(!"LAPACKE__gelsd should be involved with LAPACKE loaded");
     #endif
 
-    // delete [] s;
-    // delete [] FtF;
-    return;
+    T* FtF = pool_fast.allocate(static_cast<std::size_t>(m) * m);
+    T* singular_values = pool_fast.allocate(m);
+    if (N > 0) {
+        if constexpr (std::is_same_v<T, double>) {
+            int status = Xlsdft_backend::pulay_gram(
+                static_cast<int>(N), static_cast<int>(m), F,
+                static_cast<int>(N), FtF, static_cast<int>(m));
+            Xlsdft_backend::require_success(Xlsdft_backend::Operation::pulay_gram,
+                status, comm,
+                {"pulay_gram", m, m, N, N, 0, m,
+                 F, nullptr, FtF, nullptr, 0});
+            status = Xlsdft_backend::pulay_tmv(
+                static_cast<int>(N), static_cast<int>(m), F,
+                static_cast<int>(N), f, Gamma);
+            Xlsdft_backend::require_success(Xlsdft_backend::Operation::pulay_tmv,
+                status, comm,
+                {"pulay_tmv", m, 1, N, N, 0, m,
+                 F, f, Gamma, nullptr, 0});
+        } else {
+            for (uint column = 0; column < m; ++column) {
+                T projection = T(0);
+                for (uint row = 0; row < N; ++row) {
+                    projection += F[row + static_cast<std::size_t>(column) * N] * f[row];
+                }
+                Gamma[column] = projection;
+                for (uint other = 0; other < m; ++other) {
+                    T dot = T(0);
+                    for (uint row = 0; row < N; ++row) {
+                        dot += F[row + static_cast<std::size_t>(column) * N]
+                             * F[row + static_cast<std::size_t>(other) * N];
+                    }
+                    FtF[column + static_cast<std::size_t>(other) * m] = dot;
+                }
+            }
+        }
+    } else {
+        std::fill_n(FtF, static_cast<std::size_t>(m) * m, T(0));
+        std::fill_n(Gamma, m, T(0));
+    }
+
+    int comm_size = 1;
+    MPI_Comm_size(comm, &comm_size);
+    if (comm_size > 1) {
+        const MPI_Datatype datatype = Linalg::get_mpi_datatype<T>();
+        MPI_Allreduce(MPI_IN_PLACE, FtF, m * m, datatype, MPI_SUM, comm);
+        MPI_Allreduce(MPI_IN_PLACE, Gamma, m, datatype, MPI_SUM, comm);
+    }
+
+    int status = 0;
+    const void* failure_workspace = nullptr;
+    std::size_t failure_workspace_doubles = 0U;
+    if constexpr (std::is_same_v<T, double>) {
+        const std::size_t workspace_doubles =
+            Xlsdft_backend::pulay_gelsd_workspace_doubles(static_cast<int>(m));
+        double* workspace = pool_fast.allocate(workspace_doubles);
+        failure_workspace = workspace;
+        failure_workspace_doubles = workspace_doubles;
+        alignas(64) int rank = 0;
+        status = Xlsdft_backend::pulay_gelsd(
+            static_cast<int>(m), FtF, static_cast<int>(m), Gamma,
+            singular_values, -1.0, &rank, workspace, workspace_doubles);
+    } else {
+        status = solve_pulay_via_f64(m, FtF, Gamma, singular_values);
+    }
+    Xlsdft_backend::require_success(Xlsdft_backend::Operation::pulay_gelsd,
+        status, comm,
+        {"pulay_gelsd", m, m, 1, m, 0, m,
+         FtF, Gamma, singular_values,
+         failure_workspace, failure_workspace_doubles});
 }
 template void Mixing_method::cal_Gamma_ompunnested_mp<float>(const uint N, const uint m, float const* const F,
                                                 float const* const f, float* const Gamma, const MPI_Comm comm,
